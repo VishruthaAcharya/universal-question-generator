@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime files
+storage/uploads/*
+storage/outputs/*
+backend/storage/uploads/*
+backend/storage/outputs/*
+!storage/uploads/.gitkeep
+!storage/outputs/.gitkeep
+!backend/storage/uploads/.gitkeep
+!backend/storage/outputs/.gitkeep
+
+# Logs
+*.log
