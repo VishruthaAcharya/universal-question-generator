@@ -1,48 +1,110 @@
-import type { Question } from "../types";
+import type { CompatibilityReport, QuestionRow, TemplateSchema } from "../types";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export async function generate(
-  template: File,
-  source: File,
-  questionCount: number,
-  difficulty: string,
-  score: number
-) {
+export async function uploadTemplate(file: File) {
   const form = new FormData();
-  form.append("template", template);
-  form.append("source", source);
-  form.append("transformation", "CET-style MCQ");
-  form.append("difficulty", difficulty);
-  form.append("score", String(score));
-  form.append("question_count", String(questionCount));
+  form.append("file", file);
 
-  const res = await fetch(`${API}/api/generate`, { method: "POST", body: form });
-  const data = await res.json();
-  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
-  return data as { columns: string[]; questions: Question[]; validation: unknown[] };
-}
-
-export async function regenerate(question: Question) {
-  const res = await fetch(`${API}/api/regenerate`, {
+  const res = await fetch(`${API}/api/templates/upload`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(question),
+    body: form,
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || "Regeneration failed");
-  return data.question as Question;
+  if (!res.ok) {
+    throw new Error(data.detail || "Template upload failed");
+  }
+  return data as {
+    template_id: string;
+    name: string;
+    original_filename: string;
+    schema: TemplateSchema;
+  };
 }
 
-export async function exportQuestions(questions: Question[], columns: string[], format: "csv" | "xlsx") {
+export async function uploadSource(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API}/api/sources/upload`, {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "Source document upload failed");
+  }
+  return data as {
+    source_filename: string;
+    source_type: string;
+    questions: Record<string, any>[];
+  };
+}
+
+export async function checkCompatibility(templateId: string, questions: Record<string, any>[]) {
+  const res = await fetch(`${API}/api/validate-compatibility`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ template_id: templateId, questions }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "Compatibility check failed");
+  }
+  return data as CompatibilityReport;
+}
+
+export async function mapQuestions(
+  templateId: string,
+  questions: Record<string, any>[],
+  sourceFilename: string,
+  sourceType: string
+) {
+  const res = await fetch(`${API}/api/map`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      template_id: templateId,
+      questions,
+      source_filename: sourceFilename,
+      source_type: sourceType,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "Mapping failed");
+  }
+  return data as {
+    question_set_id: string;
+    template_name: string;
+    columns: string[];
+    questions: QuestionRow[];
+  };
+}
+
+export async function updateQuestion(questionId: string, payload: Record<string, string>) {
+  const res = await fetch(`${API}/api/questions/${questionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const errorMsg = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+    throw new Error(errorMsg || "Question update failed");
+  }
+  return data as QuestionRow;
+}
+
+export async function exportQuestionSet(questionSetId: string, format: "csv" | "xlsx") {
   const res = await fetch(`${API}/api/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ questions, columns, format }),
+    body: JSON.stringify({ question_set_id: questionSetId, format }),
   });
   if (!res.ok) {
     const data = await res.json();
-    throw new Error(data.detail?.message || data.detail || "Export failed");
+    throw new Error(data.detail || "Export failed");
   }
   return await res.blob();
 }

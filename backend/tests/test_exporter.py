@@ -1,12 +1,13 @@
-from app.services.exporter import map_to_template
-from app.services.template import REQUIRED_COLUMNS
+import io
+import pandas as pd
+from app.services.exporter import export_to_csv
 
-def test_mapping():
+def test_mapping_export():
     q = {
-        "question": "Q", "topic": "T", "subtopic": "S",
-        "answer_1": "A", "answer_2": "B", "answer_3": "C", "answer_4": "D",
-        "difficulty": "Easy", "correct_answer": "A", "score": 1
+        "Question": "Q", "Topic": "T", "Starter Code": "print(1)", "Correct Answer": "1"
     }
-    df = map_to_template([q], REQUIRED_COLUMNS)
-    assert list(df.columns) == REQUIRED_COLUMNS
-    assert df.iloc[0]["Correct Answer"] == "A"
+    cols = ["Question", "Topic", "Starter Code", "Correct Answer"]
+    buf = export_to_csv([q], cols)
+    df = pd.read_csv(io.StringIO(buf.getvalue().decode("utf-8")))
+    assert list(df.columns) == cols
+    assert df.iloc[0]["Correct Answer"] == "1"

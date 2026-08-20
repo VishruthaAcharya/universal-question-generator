@@ -1,23 +1,103 @@
 from pathlib import Path
 import pandas as pd
+from typing import Any
 
-REQUIRED_COLUMNS = [
-    "Question", "Question Topic", "Sub Topic",
-    "Answer 1", "Answer 2", "Answer 3", "Answer 4",
-    "Difficulty Level", "Correct Answer", "Score"
-]
+NORMALIZATION_MAP = {
+    "question": "question",
+    "questiontext": "question",
+    "problemstatement": "question",
+    
+    "questiontopic": "topic",
+    "topic": "topic",
+    "subject": "topic",
+    
+    "subtopic": "subtopic",
+    
+    "answer1": "option_1",
+    "optiona": "option_1",
+    "option1": "option_1",
+    
+    "answer2": "option_2",
+    "optionb": "option_2",
+    "option2": "option_2",
+    
+    "answer3": "option_3",
+    "optionc": "option_3",
+    "option3": "option_3",
+    
+    "answer4": "option_4",
+    "optiond": "option_4",
+    "option4": "option_4",
+    
+    "correctanswer": "correct_answer",
+    "answer": "correct_answer",
+    "correctoption": "correct_answer",
+    
+    "startercode": "starter_code",
+    "startingcode": "starter_code",
+    "codetemplate": "starter_code",
+    
+    "expectedoutput": "expected_output",
+    "output": "expected_output",
+    
+    "testcases": "test_cases",
+    "testcase": "test_cases",
+    
+    "difficultylevel": "difficulty",
+    "difficulty": "difficulty",
+    
+    "score": "score",
+    "marks": "score",
+    "mark": "score"
+}
 
-def read_template(path: str) -> list[str]:
+REQUIRED_CORE_FIELDS = {"question", "correct_answer", "starter_code", "test_cases", "option_1", "option_2", "option_3", "option_4"}
+
+def normalize_field_name(name: str) -> str:
+    cleaned = "".join(name.split()).lower()
+    return NORMALIZATION_MAP.get(cleaned, cleaned)
+
+def read_template_schema(path: str) -> dict[str, Any]:
     p = Path(path)
-    if p.suffix.lower() == ".csv":
-        df = pd.read_csv(path, nrows=0)
-    elif p.suffix.lower() in {".xlsx", ".xls"}:
-        df = pd.read_excel(path, nrows=0)
+    suffix = p.suffix.lower()
+    sheet_name = None
+
+    if suffix == ".csv":
+        df = pd.read_csv(path)
+    elif suffix in {".xlsx", ".xls"}:
+        excel_file = pd.ExcelFile(path)
+        sheet_name = excel_file.sheet_names[0]
+        df = pd.read_excel(excel_file, sheet_name=sheet_name)
     else:
         raise ValueError("Template must be CSV or XLSX")
 
-    columns = [str(c) for c in df.columns]
-    missing = [c for c in REQUIRED_COLUMNS if c not in columns]
-    if missing:
-        raise ValueError("Template is missing required columns: " + ", ".join(missing))
-    return columns
+    columns = [str(c).strip() for c in df.columns]
+    
+    # Analyze columns
+    column_schema = []
+    for col in columns:
+        normalized = normalize_field_name(col)
+        # Check if mandatory
+        is_required = normalized in REQUIRED_CORE_FIELDS
+        
+        # Check example values
+        example_val = None
+        if not df.empty:
+            non_null = df[col].dropna()
+            if not non_null.empty:
+                example_val = str(non_null.iloc[0])
+
+        column_schema.append({
+            "original_name": col,
+            "normalized_name": normalized,
+            "required": is_required,
+            "example_value": example_val
+        })
+
+    return {
+        "original_filename": p.name,
+        "sheet_name": sheet_name,
+        "columns": columns,
+        "column_schema": column_schema,
+        "has_examples": len(df) > 0
+    }
