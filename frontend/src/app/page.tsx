@@ -1,26 +1,55 @@
 "use client";
 
-import { useState, useRef, useMemo } from "react";
-import type { QuestionRow, TemplateSchema, CompatibilityReport } from "../types";
-import { 
-  uploadTemplate, 
-  uploadSource, 
-  checkCompatibility, 
-  mapQuestions, 
-  updateQuestion, 
-  exportQuestionSet 
+import { useState } from "react";
+import type {
+  QuestionRow,
+  TemplateSchema,
+  SavedTemplate,
+  CompatibilityReport,
+  AssessmentBatchConfig,
+  FactoryStepKey,
+  AIFillSuggestion,
+} from "../types";
+import {
+  uploadSource,
+  checkCompatibility,
+  mapQuestions,
+  updateQuestion,
+  exportQuestionSet,
 } from "../lib/api";
-
-type Step = "template" | "source" | "compatibility" | "review" | "export";
+import MenntrAppShell from "../components/MenntrAppShell";
+import AlertPanel from "../components/AlertPanel";
+import TemplateStep from "../components/steps/TemplateStep";
+import SourceStep from "../components/steps/SourceStep";
+import QuestionSelectionStep from "../components/steps/QuestionSelectionStep";
+import CompatibilityStep from "../components/steps/CompatibilityStep";
+import ValidationStep from "../components/steps/ValidationStep";
+import ReviewStep from "../components/steps/ReviewStep";
+import QualityDashboardStep from "../components/steps/QualityDashboardStep";
+import ExportStep from "../components/steps/ExportStep";
 
 export default function Home() {
-  const [currentStep, setCurrentStep] = useState<Step>("template");
-  
-  // Files and data states
+  // Primary Workflow Navigation (8 Steps)
+  const [currentStep, setCurrentStep] = useState<FactoryStepKey>("templates");
+
+  // Assessment Details Configuration
+  const [batchConfig, setBatchConfig] = useState<AssessmentBatchConfig>({
+    assessmentName: "Grade 10 Mathematics Periodic Assessment",
+    subject: "Mathematics",
+    gradeClass: "Class 10",
+    chapterTopic: "Unit 4: Quadratic Equations",
+    questionType: "Multiple Choice (MCQ)",
+    language: "English",
+    targetQualityThreshold: 100,
+  });
+
+  // Template / Schema State
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [templateId, setTemplateId] = useState<string>("");
+  const [templateName, setTemplateName] = useState<string>("");
   const [templateSchema, setTemplateSchema] = useState<TemplateSchema | null>(null);
-  
+
+  // Source Document & Raw Extracted Questions
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [sourceData, setSourceData] = useState<{
     source_filename: string;
@@ -28,136 +57,137 @@ export default function Home() {
     questions: Record<string, any>[];
   } | null>(null);
 
+  // All extracted raw questions (e.g. 28 detected)
+  const [rawQuestions, setRawQuestions] = useState<Record<string, any>[]>([]);
+  // Indices of user-selected questions
+  const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
+
+  // Compatibility & Mapping
   const [compatibility, setCompatibility] = useState<CompatibilityReport | null>(null);
-  
   const [questionSetId, setQuestionSetId] = useState<string>("");
   const [columns, setColumns] = useState<string[]>([]);
   const [questions, setQuestions] = useState<QuestionRow[]>([]);
-  
-  // UI states
+
+  // UI States
   const [loading, setLoading] = useState(false);
   const [extractionProgress, setExtractionProgress] = useState<string>("");
-  const [error, setError] = useState("");
-  
-  // Search and Filter states
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filterValidation, setFilterValidation] = useState<"all" | "valid" | "invalid">("all");
-  const [filterOrigin, setFilterOrigin] = useState<"all" | "extracted" | "inferred" | "user_edited">("all");
+  const [error, setError] = useState<string>("");
 
-  const templateInputRef = useRef<HTMLInputElement>(null);
-  const sourceInputRef = useRef<HTMLInputElement>(null);
-
-  // File Upload Handlers
-  async function handleTemplateChange(file: File) {
-    setLoading(true);
-    setError("");
-    try {
-      const res = await uploadTemplate(file);
-      setTemplateFile(file);
-      setTemplateId(res.template_id);
-      setTemplateSchema(res.schema);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to upload template");
-      setTemplateFile(null);
-      setTemplateSchema(null);
-    } finally {
-      setLoading(false);
-    }
+  // Handler: Selected Template from Registry or Custom Upload
+  function handleTemplateSelected(id: string, name: string, schema: TemplateSchema) {
+    setTemplateId(id);
+    setTemplateName(name);
+    setTemplateSchema(schema);
   }
 
-  async function handleSourceChange(file: File) {
+  // Handler: Source Upload & Complete Extraction
+  async function handleSourceUpload(file: File) {
     setLoading(true);
     setError("");
-    setExtractionProgress("Reading document pages...");
+    setExtractionProgress("Extracting text nodes, OCR scanning, and detecting ALL question blocks...");
     try {
       const res = await uploadSource(file);
       setSourceFile(file);
       setSourceData(res);
-      setExtractionProgress("Parsing complete!");
+      setRawQuestions(res.questions || []);
+      // Default to selecting ALL detected questions
+      const allIndices = (res.questions || []).map((_, i) => i);
+      setSelectedIndices(allIndices);
+      setExtractionProgress("Extraction complete!");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to upload source");
+      setError(e instanceof Error ? e.message : "Failed to parse source document");
       setSourceFile(null);
       setSourceData(null);
+      setRawQuestions([]);
+      setSelectedIndices([]);
       setExtractionProgress("");
     } finally {
       setLoading(false);
     }
   }
 
-  // Transitions
+  // Get active questions subset based on user selection
+  const getSelectedQuestions = () => {
+    return selectedIndices.map((idx) => rawQuestions[idx]).filter(Boolean);
+  };
+
+  // Handler: Compatibility Check for Selected Questions
   async function proceedToCompatibility() {
-    if (!templateId || !sourceData) return;
+    if (!templateId || selectedIndices.length === 0) return;
     setLoading(true);
     setError("");
     try {
-      const report = await checkCompatibility(templateId, sourceData.questions);
+      const activeQuestions = getSelectedQuestions();
+      const report = await checkCompatibility(templateId, activeQuestions);
       setCompatibility(report);
-      setCurrentStep("compatibility");
+      setCurrentStep("mapping");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed compatibility check");
+      setError(e instanceof Error ? e.message : "Schema compatibility check failed");
     } finally {
       setLoading(false);
     }
   }
 
+  // Handler: Execute AI Mapping
   async function proceedToMapping() {
-    if (!templateId || !sourceData) return;
+    if (!templateId || selectedIndices.length === 0) return;
     setLoading(true);
     setError("");
     try {
+      const activeQuestions = getSelectedQuestions();
       const result = await mapQuestions(
-        templateId, 
-        sourceData.questions, 
-        sourceData.source_filename, 
-        sourceData.source_type
+        templateId,
+        activeQuestions,
+        sourceData?.source_filename || sourceFile?.name || "source_file",
+        sourceData?.source_type || "pdf"
       );
       setQuestionSetId(result.question_set_id);
       setColumns(result.columns);
       setQuestions(result.questions);
-      setCurrentStep("review");
+      setCurrentStep("validation");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to map questions");
+      setError(e instanceof Error ? e.message : "Question mapping failed");
     } finally {
       setLoading(false);
     }
   }
 
-  // Real-time Edit Handler
+  // Handler: Cell Edit Sync (and AI Fill acceptances)
   async function handleCellChange(questionId: string, columnName: string, newValue: string) {
-    // Optimistic UI update
-    setQuestions(prev => prev.map(q => {
-      if (q.id === questionId) {
-        return {
-          ...q,
-          data_json: {
-            ...q.data_json,
-            [columnName]: newValue
-          },
-          source_metadata: {
-            source_page: q.source_metadata?.source_page ?? null,
-            fields: {
-              ...(q.source_metadata?.fields ?? {}),
-              [columnName]: {
-                origin: "user_edited",
-                confidence: 1.0
-              }
-            }
-          }
-        };
-      }
-      return q;
-    }));
+    setQuestions((prev) =>
+      prev.map((q) => {
+        if (q.id === questionId) {
+          return {
+            ...q,
+            data_json: {
+              ...q.data_json,
+              [columnName]: newValue,
+            },
+            source_metadata: {
+              source_page: q.source_metadata?.source_page ?? null,
+              fields: {
+                ...(q.source_metadata?.fields ?? {}),
+                [columnName]: {
+                  origin: "user_edited",
+                  confidence: 1.0,
+                },
+              },
+            },
+          };
+        }
+        return q;
+      })
+    );
 
     try {
       const updated = await updateQuestion(questionId, { [columnName]: newValue });
-      // Apply exact validation and status from server response
-      setQuestions(prev => prev.map(q => q.id === questionId ? updated : q));
+      setQuestions((prev) => prev.map((q) => (q.id === questionId ? updated : q)));
     } catch (e) {
-      console.error("Failed to sync edit:", e);
+      console.error("Cell update sync error:", e);
     }
   }
 
-  // Export Trigger
+  // Handler: Export
   async function handleExport(format: "csv" | "xlsx") {
     if (!questionSetId) return;
     setLoading(true);
@@ -167,476 +197,147 @@ export default function Home() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `exported_questions_${templateSchema?.name || "set"}.${format}`;
+      const safeTitle = (batchConfig.assessmentName || "menntr_assessment").replace(/\s+/g, "_").toLowerCase();
+      a.download = `${safeTitle}_export.${format}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Export failed");
+      setError(e instanceof Error ? e.message : "Assessment export failed");
     } finally {
       setLoading(false);
     }
   }
 
-  // Filtered Questions list
-  const filteredQuestions = useMemo(() => {
-    return questions.filter(q => {
-      // 1. Search filter
-      const textMatch = Object.values(q.data_json).some(val => 
-        String(val).toLowerCase().includes(searchQuery.toLowerCase())
-      );
-      if (!textMatch) return false;
-
-      // 2. Validation filter
-      if (filterValidation === "valid" && !q.validation.valid) return false;
-      if (filterValidation === "invalid" && q.validation.valid) return false;
-
-      // 3. Origin filter
-      if (filterOrigin !== "all") {
-        const hasMatchingFieldOrigin = Object.keys(q.data_json).some(col => {
-          const origin = q.source_metadata?.fields?.[col]?.origin;
-          return origin === filterOrigin;
-        });
-        if (!hasMatchingFieldOrigin) return false;
-      }
-
-      return true;
-    });
-  }, [questions, searchQuery, filterValidation, filterOrigin]);
-
-  const stepsList = [
-    { key: "template", label: "Template Schema" },
-    { key: "source", label: "Source Extraction" },
-    { key: "compatibility", label: "Compatibility Check" },
-    { key: "review", label: "Review & Edit" },
-    { key: "export", label: "Export Result" }
-  ];
+  const validQuestionsCount = questions.filter((q) => q.validation.valid).length;
 
   return (
-    <main className="container">
-      <header>
-        <h1>Universal Question Generator</h1>
-        <p className="subtitle">Deterministic template-driven question parser, validator, and review platform.</p>
-      </header>
-
-      {/* Progress Tracker */}
-      <div className="steps-indicator">
-        {stepsList.map((s, idx) => {
-          const isCompleted = stepsList.findIndex(x => x.key === currentStep) > idx;
-          const isActive = currentStep === s.key;
-          return (
-            <div 
-              key={s.key} 
-              className={`step-node ${isActive ? "active" : ""} ${isCompleted ? "completed" : ""}`}
+    <MenntrAppShell
+      currentStep={currentStep}
+      onNavigate={(step) => setCurrentStep(step)}
+      batchConfig={batchConfig}
+      onUpdateBatchConfig={setBatchConfig}
+      totalDetected={rawQuestions.length}
+      totalSelected={selectedIndices.length}
+      validQuestions={validQuestionsCount}
+      hasSource={Boolean(sourceData)}
+      hasSchema={Boolean(templateSchema)}
+      hasMapped={questions.length > 0}
+    >
+      {error && (
+        <AlertPanel type="danger" style={{ marginBottom: "20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>{error}</span>
+            <button
+              className="secondary"
+              onClick={() => setError("")}
+              style={{ padding: "2px 8px", fontSize: "0.75rem" }}
             >
-              <div className="step-number">
-                {isCompleted ? "✓" : idx + 1}
-              </div>
-              <span className="step-label">{s.label}</span>
-            </div>
-          );
-        })}
-      </div>
-
-      {error && <div className="alert-panel danger">{error}</div>}
-
-      {/* Step 1: Upload Template */}
-      {currentStep === "template" && (
-        <section className="card">
-          <div className="card-title">
-            <span className="file-icon">📋</span> Step 1: Upload Question Template
+              Dismiss
+            </button>
           </div>
-          <p style={{ color: "var(--text-secondary)", marginBottom: "20px" }}>
-            Upload an Excel (XLSX) or CSV template. This establishes the output column order, field names, and requirements.
-          </p>
-          
-          <input 
-            type="file" 
-            ref={templateInputRef}
-            accept=".csv,.xlsx,.xls" 
-            onChange={e => e.target.files?.[0] && handleTemplateChange(e.target.files[0])} 
-          />
-          
-          <div 
-            className={`file-upload-zone ${templateFile ? "has-file" : ""}`}
-            onClick={() => templateInputRef.current?.click()}
-          >
-            {templateFile ? (
-              <>
-                <span style={{ fontSize: "2.5rem" }}>📄</span>
-                <strong>{templateFile.name}</strong>
-                <span className="badge success">Template Uploaded Successfully</span>
-              </>
-            ) : (
-              <>
-                <span style={{ fontSize: "2.5rem" }}>📥</span>
-                <strong>Drag & drop or click to browse</strong>
-                <span style={{ color: "var(--text-secondary)" }}>Supports CSV, XLSX, XLS</span>
-              </>
-            )}
-          </div>
-
-          {templateSchema && (
-            <div style={{ marginTop: "32px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-                <h3 style={{ margin: 0 }}>Detected Template Columns ({templateSchema.columns.length})</h3>
-                {templateSchema.sheet_name && (
-                  <span className="badge info">Active Sheet: {templateSchema.sheet_name}</span>
-                )}
-              </div>
-              <div className="table-wrapper">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Column Name</th>
-                      <th>Mapping Category</th>
-                      <th>Mandatory</th>
-                      <th>Detected Sample</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {templateSchema.column_schema.map((c, i) => (
-                      <tr key={i}>
-                        <td><strong>{c.original_name}</strong></td>
-                        <td>
-                          <span className={`badge ${c.original_name === c.normalized_name ? "info" : "success"}`}>
-                            {c.normalized_name}
-                          </span>
-                        </td>
-                        <td>
-                          {c.required ? (
-                            <span className="badge danger">Required</span>
-                          ) : (
-                            <span className="badge info">Optional</span>
-                          )}
-                        </td>
-                        <td style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>
-                          {c.example_value || "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div style={{ marginTop: "24px", display: "flex", justifyContent: "flex-end" }}>
-                <button className="primary" onClick={() => setCurrentStep("source")}>
-                  Proceed to Step 2 →
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+        </AlertPanel>
       )}
 
-      {/* Step 2: Upload Source */}
+      {/* Step 1: Template Registry & Schema */}
+      {currentStep === "templates" && (
+        <TemplateStep
+          templateFile={templateFile}
+          templateId={templateId}
+          templateSchema={templateSchema}
+          onTemplateSelected={handleTemplateSelected}
+          onNext={() => setCurrentStep("source")}
+        />
+      )}
+
+      {/* Step 2: Source Files Upload & Full Extraction */}
       {currentStep === "source" && (
-        <section className="card">
-          <div className="card-title">
-            <span className="file-icon">📚</span> Step 2: Upload Source File
-          </div>
-          <p style={{ color: "var(--text-secondary)", marginBottom: "20px" }}>
-            Upload the source file containing questions (PDF, TXT, CSV, XLSX, DOCX, PNG, JPG, JPEG).
-          </p>
-
-          <input 
-            type="file" 
-            ref={sourceInputRef}
-            accept=".pdf,.txt,.csv,.xlsx,.xls,.docx,.png,.jpg,.jpeg,.webp" 
-            onChange={e => e.target.files?.[0] && handleSourceChange(e.target.files[0])} 
-          />
-
-          <div 
-            className={`file-upload-zone ${sourceFile ? "has-file" : ""}`}
-            onClick={() => sourceInputRef.current?.click()}
-          >
-            {sourceFile ? (
-              <>
-                <span style={{ fontSize: "2.5rem" }}>📄</span>
-                <strong>{sourceFile.name}</strong>
-                <span className="badge success">Source Loaded</span>
-              </>
-            ) : (
-              <>
-                <span style={{ fontSize: "2.5rem" }}>📥</span>
-                <strong>Select source document</strong>
-                <span style={{ color: "var(--text-secondary)" }}>Supports PDF, TXT, Excel, Word, CSV, Images</span>
-              </>
-            )}
-          </div>
-
-          {loading && extractionProgress && (
-            <div style={{ marginTop: "24px", textAlign: "center", color: "var(--primary)" }}>
-              <span className="spinner">⚙️</span> {extractionProgress}
-            </div>
-          )}
-
-          {sourceData && (
-            <div style={{ marginTop: "32px" }}>
-              <div className="alert-panel success">
-                <strong>Extracted Successfully!</strong>
-                Found {sourceData.questions.length} question blocks in the source file.
-              </div>
-
-              <div style={{ marginTop: "24px", display: "flex", justifyContent: "space-between" }}>
-                <button onClick={() => setCurrentStep("template")}>← Back to Template</button>
-                <button className="primary" onClick={proceedToCompatibility} disabled={loading}>
-                  {loading ? "Checking Compatibility..." : "Verify Compatibility →"}
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+        <SourceStep
+          sourceFile={sourceFile}
+          sourceData={sourceData}
+          loading={loading}
+          extractionProgress={extractionProgress}
+          onSourceChange={handleSourceUpload}
+          onBack={() => setCurrentStep("templates")}
+          onNext={() => setCurrentStep("selection")}
+        />
       )}
 
-      {/* Step 3: Compatibility Verification */}
-      {currentStep === "compatibility" && compatibility && (
-        <section className="card">
-          <div className="card-title">
-            <span className="file-icon">⚖️</span> Step 3: Compatibility Check
-          </div>
-
-          {compatibility.compatible ? (
-            <div className="alert-panel success" style={{ marginBottom: "24px" }}>
-              <h3 style={{ marginBottom: "6px" }}>✓ Template and source are compatible!</h3>
-              All required fields defined in your template were successfully identified or parsed from the source document.
-            </div>
-          ) : (
-            <div className="alert-panel danger" style={{ marginBottom: "24px" }}>
-              <h3 style={{ marginBottom: "6px" }}>❌ Incompatible Schema Detected</h3>
-              The source file is missing required fields defined in the template. Processing is blocked.
-            </div>
-          )}
-
-          <div className="row" style={{ gap: "32px", marginTop: "16px" }}>
-            <div className="col-half">
-              <h4 style={{ marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                Required Fields Status
-              </h4>
-              <ul className="list-unstyled">
-                {templateSchema?.column_schema.filter(c => c.required).map((c, i) => {
-                  const isMissing = compatibility.errors.some(e => e.field === c.original_name);
-                  const isWarning = compatibility.warnings.some(w => w.field === c.original_name);
-                  return (
-                    <li key={i} style={{ color: isMissing ? "var(--danger)" : isWarning ? "var(--warning)" : "var(--accent)" }}>
-                      {isMissing ? "❌" : isWarning ? "⚠️" : "✓"} {c.original_name} {isMissing ? "(Missing)" : isWarning ? "(AI will infer)" : "(Found)"}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-
-            <div className="col-half">
-              <h4 style={{ marginBottom: "12px" }}>Warnings & Optional Fields</h4>
-              {compatibility.warnings.length > 0 ? (
-                <ul className="list-unstyled">
-                  {compatibility.warnings.map((w, i) => (
-                    <li key={i} style={{ color: "var(--warning)" }}>
-                      ⚠️ {w.message}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p style={{ color: "var(--text-secondary)", fontStyle: "italic" }}>No warnings. All fields mapped successfully.</p>
-              )}
-            </div>
-          </div>
-
-          <div style={{ marginTop: "40px", display: "flex", justifyContent: "space-between" }}>
-            <button onClick={() => setCurrentStep("source")}>← Change Source</button>
-            
-            {compatibility.compatible ? (
-              <button className="accent" onClick={proceedToMapping} disabled={loading}>
-                {loading ? "Mapping questions..." : "Map & Continue to Review →"}
-              </button>
-            ) : (
-              <button onClick={() => setCurrentStep("template")}>Choose Different Template</button>
-            )}
-          </div>
-        </section>
+      {/* Step 3: Question Selection & Subsetting */}
+      {currentStep === "selection" && (
+        <QuestionSelectionStep
+          rawQuestions={rawQuestions}
+          selectedIndices={selectedIndices}
+          onSelectionChange={setSelectedIndices}
+          onBack={() => setCurrentStep("source")}
+          onNext={() => {
+            if (!templateId) {
+              setCurrentStep("templates");
+            } else {
+              proceedToCompatibility();
+            }
+          }}
+        />
       )}
 
-      {/* Step 4: Dynamic Review & Edit */}
+      {/* Step 4: Schema Field Mapping (Informational Overview) */}
+      {currentStep === "mapping" && compatibility && (
+        <CompatibilityStep
+          compatibility={compatibility}
+          templateSchema={templateSchema}
+          selectedQuestionsCount={selectedIndices.length}
+          loading={loading}
+          onBack={() => setCurrentStep("selection")}
+          onChangeTemplate={() => setCurrentStep("templates")}
+          onProceedToMapping={proceedToMapping}
+        />
+      )}
+
+      {/* Step 5: AI Validation Dashboard */}
+      {currentStep === "validation" && (
+        <ValidationStep
+          questions={questions}
+          columns={columns}
+          onProceedToReview={() => setCurrentStep("review")}
+          onBack={() => setCurrentStep("mapping")}
+        />
+      )}
+
+      {/* Step 6: Human Review & AI-Assisted Workspace */}
       {currentStep === "review" && (
-        <section className="card" style={{ maxWidth: "100%" }}>
-          <div className="card-title" style={{ justifyContent: "space-between" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <span className="file-icon">✏️</span> Dynamic Grid Review
-            </div>
-            <span className="badge info">{questions.length} items parsed</span>
-          </div>
-
-          <p style={{ color: "var(--text-secondary)", marginBottom: "20px" }}>
-            Review the mapped questions below. Changes are saved to PostgreSQL in real-time. Fix validation errors before exporting.
-          </p>
-
-          {/* Search and Filters Bar */}
-          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", marginBottom: "24px" }}>
-            <div style={{ flex: 1, minWidth: "240px" }}>
-              <input 
-                type="text" 
-                placeholder="🔍 Search questions..." 
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-              />
-            </div>
-            
-            <div>
-              <select value={filterValidation} onChange={e => setFilterValidation(e.target.value as any)}>
-                <option value="all">All Validation Statuses</option>
-                <option value="valid">Valid only</option>
-                <option value="invalid">Invalid only</option>
-              </select>
-            </div>
-
-            <div>
-              <select value={filterOrigin} onChange={e => setFilterOrigin(e.target.value as any)}>
-                <option value="all">All Field Origins</option>
-                <option value="extracted">Extracted from Source</option>
-                <option value="inferred">AI Inferred</option>
-                <option value="user_edited">User Edited</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th style={{ width: "60px" }}>Row</th>
-                  <th style={{ width: "90px" }}>Source Page</th>
-                  <th style={{ width: "100px" }}>Status</th>
-                  {columns.map((col, idx) => (
-                    <th key={idx} style={{ minWidth: "220px" }}>{col}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredQuestions.map((q) => {
-                  const isValid = q.validation.valid;
-                  const sourcePage = q.source_metadata?.source_page;
-                  return (
-                    <tr key={q.id}>
-                      <td style={{ textAlign: "center", fontWeight: "600" }}>{q.row_number}</td>
-                      <td style={{ textAlign: "center", color: "var(--text-secondary)" }}>
-                        {sourcePage ? `p. ${sourcePage}` : "—"}
-                      </td>
-                      <td>
-                        <span 
-                          className={`badge ${isValid ? "success" : "danger"}`}
-                          title={q.validation.errors.join("\n")}
-                          style={{ cursor: "pointer" }}
-                        >
-                          {isValid ? "Valid" : "Invalid"}
-                        </span>
-                        {!isValid && (
-                          <div style={{ fontSize: "0.75rem", color: "var(--danger)", marginTop: "4px", maxWidth: "160px" }}>
-                            {q.validation.errors.map((e, idx) => <div key={idx}>• {e}</div>)}
-                          </div>
-                        )}
-                      </td>
-                      {columns.map((col) => {
-                        const cellVal = q.data_json[col] || "";
-                        const meta = q.source_metadata?.fields?.[col];
-                        const origin = meta?.origin || "missing";
-                        const confidence = meta?.confidence;
-                        const isDiff = col.toLowerCase().includes("difficulty");
-
-                        return (
-                          <td key={col} style={{ position: "relative" }}>
-                            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                              {isDiff ? (
-                                <select 
-                                  value={cellVal} 
-                                  onChange={e => handleCellChange(q.id, col, e.target.value)}
-                                >
-                                  <option value="">— Select Difficulty —</option>
-                                  <option value="Easy">Easy</option>
-                                  <option value="Medium">Medium</option>
-                                  <option value="Hard">Hard</option>
-                                  <option value="Auto">Auto</option>
-                                </select>
-                              ) : (
-                                <textarea 
-                                  rows={2}
-                                  value={cellVal}
-                                  onChange={e => handleCellChange(q.id, col, e.target.value)}
-                                />
-                              )}
-                              
-                              {/* Metadata/Origin details */}
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.72rem" }}>
-                                {origin === "inferred" && (
-                                  <span style={{ color: "var(--warning)" }} title={`Confidence: ${(confidence ?? 0 * 100).toFixed(0)}%`}>
-                                    ✨ AI Inferred
-                                  </span>
-                                )}
-                                {origin === "user_edited" && (
-                                  <span style={{ color: "var(--primary-hover)" }}>
-                                    ✏️ Edited
-                                  </span>
-                                )}
-                                {origin === "missing" && cellVal === "" && (
-                                  <span style={{ color: "var(--danger)", opacity: 0.7 }}>
-                                    ❓ Missing
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div style={{ marginTop: "32px", display: "flex", justifyContent: "space-between" }}>
-            <button onClick={() => setCurrentStep("compatibility")}>← Back</button>
-            <button className="primary" onClick={() => setCurrentStep("export")}>
-              Proceed to Export →
-            </button>
-          </div>
-        </section>
+        <ReviewStep
+          columns={columns}
+          questions={questions}
+          sourceFilename={sourceData?.source_filename || sourceFile?.name || ""}
+          batchConfig={batchConfig}
+          onCellChange={handleCellChange}
+          onBack={() => setCurrentStep("validation")}
+          onNext={() => setCurrentStep("quality")}
+        />
       )}
 
-      {/* Step 5: Export Panel */}
+      {/* Step 7: Quality Dashboard & Quality Gate */}
+      {currentStep === "quality" && (
+        <QualityDashboardStep
+          questions={questions}
+          batchConfig={batchConfig}
+          onProceedToExport={() => setCurrentStep("export")}
+          onJumpToReview={() => setCurrentStep("review")}
+          onBack={() => setCurrentStep("review")}
+        />
+      )}
+
+      {/* Step 8: Final Export & Publishing */}
       {currentStep === "export" && (
-        <section className="card" style={{ textAlign: "center" }}>
-          <div className="card-title" style={{ justifyContent: "center" }}>
-            <span className="file-icon">💾</span> Final Export
-          </div>
-          
-          <div style={{ margin: "24px 0" }}>
-            <span style={{ fontSize: "5rem" }}>🎉</span>
-          </div>
-
-          <h2>Export Your Reviewed Questions</h2>
-          <p style={{ color: "var(--text-secondary)", margin: "16px auto 32px auto", maxWidth: "500px" }}>
-            The output will be formatted using your original template column order, file headers, and styles. All internal IDs are omitted.
-          </p>
-
-          {questions.some(q => !q.validation.valid) && (
-            <div className="alert-panel warning" style={{ maxWidth: "600px", margin: "0 auto 24px auto" }}>
-              ⚠️ <strong>Warning:</strong> You have questions with validation errors. It is highly recommended to fix them in the review table before downloading.
-            </div>
-          )}
-
-          <div style={{ display: "flex", gap: "16px", justifyContent: "center" }}>
-            <button className="primary" onClick={() => handleExport("xlsx")} disabled={loading}>
-              Download Excel (XLSX)
-            </button>
-            <button className="accent" onClick={() => handleExport("csv")} disabled={loading}>
-              Download CSV
-            </button>
-          </div>
-
-          <div style={{ marginTop: "40px" }}>
-            <button onClick={() => setCurrentStep("review")}>← Back to Editor</button>
-          </div>
-        </section>
+        <ExportStep
+          batchConfig={batchConfig}
+          templateName={templateName}
+          totalQuestions={questions.length}
+          hasValidationErrors={questions.some((q) => !q.validation.valid)}
+          loading={loading}
+          onExport={handleExport}
+          onBack={() => setCurrentStep("quality")}
+        />
       )}
-    </main>
+    </MenntrAppShell>
   );
 }

@@ -1,8 +1,46 @@
-import type { CompatibilityReport, QuestionRow, TemplateSchema } from "../types";
+import type {
+  CompatibilityReport,
+  QuestionRow,
+  TemplateSchema,
+  SavedTemplate,
+  AIFillSuggestion,
+  TemplateUploadResult,
+} from "../types";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export async function uploadTemplate(file: File) {
+export async function listSavedTemplates(includeArchived: boolean = false): Promise<SavedTemplate[]> {
+  try {
+    const res = await fetch(`${API}/api/templates?include_archived=${includeArchived}`);
+    if (!res.ok) return [];
+    return (await res.json()) as SavedTemplate[];
+  } catch (e) {
+    console.error("Failed to list saved templates:", e);
+    return [];
+  }
+}
+
+export async function getSavedTemplate(templateId: string): Promise<SavedTemplate> {
+  const res = await fetch(`${API}/api/templates/${templateId}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "Failed to fetch template");
+  }
+  return data as SavedTemplate;
+}
+
+export async function deleteSavedTemplate(templateId: string): Promise<{ action: string; message: string }> {
+  const res = await fetch(`${API}/api/templates/${templateId}`, {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "Failed to delete template");
+  }
+  return data as { action: string; message: string };
+}
+
+export async function uploadTemplate(file: File): Promise<TemplateUploadResult> {
   const form = new FormData();
   form.append("file", file);
 
@@ -14,12 +52,7 @@ export async function uploadTemplate(file: File) {
   if (!res.ok) {
     throw new Error(data.detail || "Template upload failed");
   }
-  return data as {
-    template_id: string;
-    name: string;
-    original_filename: string;
-    schema: TemplateSchema;
-  };
+  return data as TemplateUploadResult;
 }
 
 export async function uploadSource(file: File) {
@@ -52,6 +85,23 @@ export async function checkCompatibility(templateId: string, questions: Record<s
     throw new Error(data.detail || "Compatibility check failed");
   }
   return data as CompatibilityReport;
+}
+
+export async function aiFillMissingFields(
+  questions: Record<string, any>[],
+  fields: string[],
+  context: Record<string, any>
+): Promise<{ suggestions: AIFillSuggestion[] }> {
+  const res = await fetch(`${API}/api/ai-fill-fields`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ questions, fields, context }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "AI Fill Fields failed");
+  }
+  return data as { suggestions: AIFillSuggestion[] };
 }
 
 export async function mapQuestions(
