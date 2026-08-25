@@ -17,6 +17,7 @@ interface SourceStepProps {
     source_filename: string;
     source_type: string;
     questions: Record<string, any>[];
+    statistics?: Record<string, any>;
   } | null;
   loading: boolean;
   extractionProgress: string;
@@ -132,14 +133,40 @@ export default function SourceStep({
                   {sourceData.questions.length} Questions
                 </div>
               </div>
-              <div>
-                <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>Extraction Engine</div>
-                <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "#93C5FD" }}>
-                  {sourceData.source_type.toUpperCase()} Parser
+              {sourceData.statistics?.pages_processed && (
+                <div>
+                  <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>Pages Processed</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "#93C5FD" }}>
+                    {sourceData.statistics.pages_processed} Pages
+                  </div>
                 </div>
-              </div>
+              )}
+              {sourceData.statistics?.mcqs_detected !== undefined && (
+                <div>
+                  <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>MCQs Isolated</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--primary-hover)" }}>
+                    {sourceData.statistics.mcqs_detected} MCQs
+                  </div>
+                </div>
+              )}
+              {sourceData.statistics?.diagram_reaction_questions !== undefined && (
+                <div>
+                  <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>Reactions / Diagrams</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "#FCD34D" }}>
+                    {sourceData.statistics.diagram_reaction_questions} Items
+                  </div>
+                </div>
+              )}
+              {sourceData.statistics?.average_extraction_confidence !== undefined && (
+                <div>
+                  <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>Confidence Index</div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--accent)" }}>
+                    {(sourceData.statistics.average_extraction_confidence * 100).toFixed(0)}%
+                  </div>
+                </div>
+              )}
               <div>
-                <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>Status</div>
+                <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase" }}>Pipeline Status</div>
                 <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--accent)", display: "flex", alignItems: "center", gap: "6px" }}>
                   <CheckCircleIcon size={18} /> COMPLETE
                 </div>

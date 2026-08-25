@@ -1,9 +1,14 @@
 import hashlib
 import json
+import time
+import os
 from pathlib import Path
 from typing import Any
+from app.config import settings
 from app.services.ai_solver import (
     solve_question_independently,
+    solve_question_blind_second_pass,
+    solve_question_with_self_consistency,
     verify_with_critic,
     detect_question_ambiguity_and_defects
 )
@@ -193,17 +198,24 @@ def validate_single_question_answer(
     solver_reasoning = ai_solver_res.get("reasoning_summary")
     is_solvable = ai_solver_res.get("is_solvable", True)
 
-    # 5. Critic Verification Pass
-    critic_res = verify_with_critic(stem, options, solver_letter, solver_text, solver_reasoning, subject)
-    critic_agreed = critic_res.get("agrees_with_solver", False)
-    if critic_agreed:
-        validation_methods.append("AI_CRITIC_VERIFIED")
+    # 5. Blind Critic Second-Pass (Zero candidate answer knowledge)
+    blind_critic_res = solve_question_blind_second_pass(stem, options, subject, ctx)
+    blind_letter = blind_critic_res.get("selected_option_letter")
+    blind_text = blind_critic_res.get("selected_option_text")
+    blind_reasoning = blind_critic_res.get("reasoning_summary")
 
-    # 6. Candidate Resolution
+    # Programmatic comparison between two independent passes
+    critic_agreed = bool(solver_letter and blind_letter and str(solver_letter).strip().upper() == str(blind_letter).strip().upper())
+    if critic_agreed:
+        validation_methods.append("AI_BLIND_CRITIC_AGREED")
+
+    # 6. Candidate Resolution & Self-Consistency Tie-Breaking
     final_ai_letter = solver_letter
     final_ai_text = solver_text
     final_reasoning = solver_reasoning or "Validated by AI solver."
+    vote_agreement_ratio: float | None = None
 
+    # Deterministic validation takes first priority if verified
     if deterministic_res.get("verified"):
         det_letter = deterministic_res.get("selected_option_letter")
         det_text = deterministic_res.get("selected_option_text")
@@ -211,6 +223,23 @@ def validate_single_question_answer(
             final_ai_letter = det_letter
             final_ai_text = det_text
             final_reasoning = deterministic_res.get("reasoning") or final_reasoning
+    elif not critic_agreed and solver_letter and blind_letter:
+        # Disagreement between independent solver and blind critic -> Trigger self-consistency voting tie-breaker
+        self_consistency_res = solve_question_with_self_consistency(
+            question_stem=stem,
+            options=options,
+            subject=subject,
+            context=ctx,
+            n_samples=3,
+            temperature=0.4
+        )
+        vote_agreement_ratio = self_consistency_res.get("vote_agreement_ratio")
+        majority_letter = self_consistency_res.get("selected_option_letter")
+        if majority_letter:
+            final_ai_letter = majority_letter
+            final_ai_text = self_consistency_res.get("selected_option_text") or final_ai_text
+            final_reasoning = self_consistency_res.get("reasoning_summary") or f"Resolved via majority vote ({vote_agreement_ratio*100:.0f}% agreement)."
+            validation_methods.append("SELF_CONSISTENCY_MAJORITY_VOTE")
 
     # 7. Evidence-Based Confidence Calculation
     confidence_score, confidence_level = calculate_evidence_based_confidence(
@@ -225,7 +254,8 @@ def validate_single_question_answer(
         has_missing_info=has_missing_info,
         is_solvable=is_solvable,
         solver_answer=final_ai_letter,
-        source_answer=source_letter
+        source_answer=source_letter,
+        vote_agreement_ratio=vote_agreement_ratio
     )
 
     # 8. Status & Review Priority Classification
@@ -274,6 +304,16 @@ def validate_single_question_answer(
         # No source answer provided
         answer_match = None
 
+    signals_payload = {
+        "solver_agreed": bool(solver_letter),
+        "critic_agreed": critic_agreed,
+        "deterministic_verified": deterministic_res.get("verified", False),
+        "extraction_confidence": round(extraction_conf, 2),
+        "option_count": len(options),
+        "defects_detected": defects,
+        "vote_agreement_ratio": vote_agreement_ratio
+    }
+
     result = {
         "question_id": q_id,
         "row_number": row_number,
@@ -290,15 +330,28 @@ def validate_single_question_answer(
         "review_priority": review_priority,
         "reason": final_reasoning,
         "subject": deterministic_res.get("subject", subject),
-        "signals": {
-            "solver_agreed": bool(solver_letter),
-            "critic_agreed": critic_agreed,
-            "deterministic_verified": deterministic_res.get("verified", False),
-            "extraction_confidence": round(extraction_conf, 2),
-            "option_count": len(options),
-            "defects_detected": defects
-        }
+        "signals": signals_payload
     }
+
+    # 10. Calibration Logging Hook
+    import os
+    if settings.confidence_calibration_log or os.getenv("CONFIDENCE_CALIBRATION_LOG", "").lower() in ("true", "1"):
+        try:
+            calib_dir = Path("storage")
+            calib_dir.mkdir(parents=True, exist_ok=True)
+            calib_file = calib_dir / "calibration_log.jsonl"
+            log_row = {
+                "question_id": q_id,
+                "signals": signals_payload,
+                "confidence_score": confidence_score,
+                "confidence_level": confidence_level,
+                "validation_status": validation_status,
+                "timestamp": time.time()
+            }
+            with open(calib_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_row) + "\n")
+        except Exception as e:
+            print(f"Calibration log write warning: {e}")
 
     # Save to Cache
     save_cached_validation(q_hash, result)

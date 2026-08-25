@@ -36,7 +36,7 @@ async def export_questions(payload: dict = Body(...), db: Session = Depends(get_
     if fmt == "csv":
         buf = export_to_csv(questions_list, columns)
         filename = f"exported_{tpl.name}.csv"
-        media_type = "text/csv"
+        media_type = "text/csv; charset=utf-8"
     elif fmt == "xlsx":
         buf = export_to_xlsx(questions_list, columns, template_path=str(template_path), sheet_name=tpl.sheet_name)
         filename = f"exported_{tpl.name}.xlsx"

@@ -21,6 +21,27 @@ def get_client() -> AzureOpenAI:
         azure_deployment=settings.azure_openai_deployment_name
     )
 
+def get_critic_client() -> tuple[AzureOpenAI, str]:
+    """
+    Returns an AzureOpenAI client and deployment name for the critic pass.
+    Uses separate critic deployment if configured, otherwise falls back to primary client.
+    """
+    if not settings.azure_openai_api_key or not settings.azure_openai_endpoint:
+        raise AzureOpenAIError(
+            "Azure OpenAI is not configured. Please supply AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT."
+        )
+    critic_dep = settings.azure_openai_critic_deployment_name.strip()
+    if critic_dep:
+        api_ver = settings.azure_openai_critic_api_version.strip() or settings.azure_openai_api_version
+        client = AzureOpenAI(
+            api_key=settings.azure_openai_api_key,
+            api_version=api_ver,
+            azure_endpoint=settings.azure_openai_endpoint,
+            azure_deployment=critic_dep
+        )
+        return client, critic_dep
+    return get_client(), settings.azure_openai_deployment_name
+
 def _call_azure_with_retry(client: AzureOpenAI, create_kwargs: dict[str, Any], max_retries: int = 3, base_delay: float = 1.0):
     """Executes chat completion with exponential backoff on rate-limit (429) or transient errors."""
     for attempt in range(max_retries):
@@ -40,9 +61,11 @@ Your task is to extract questions and answers from the provided source material 
 
 Rules:
 - DO NOT generate new, unrelated questions. Only extract questions directly from the provided source.
+- Preserve source question wording and options as faithfully as possible without rewriting.
 - Extract ALL questions present in the source without arbitrary limits.
-- Preserve code indentation, mathematical notation, and tables exactly.
-- For MCQ questions, populate the options array. Keep formatting clean.
+- Preserve all Unicode scientific and mathematical symbols exactly (e.g., λ, μ, γ, ω, θ, π, α, β, Ω, °, ±, ≤, ≥, ×, ÷, μF, kΩ, H₂O, superscripts, subscripts).
+- Never replace mathematical symbols with control characters or mangled approximations (e.g., do not write 'bcF' for 'μF' or 'ac9' for 'ω' or '90b0' for '90°').
+- For MCQ questions, populate the options array with exactly the options present in the source.
 - Return ONLY a JSON object matching the requested schema.
 """
 

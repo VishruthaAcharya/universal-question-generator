@@ -9,6 +9,9 @@ except ImportError:
     docx = None
 
 def read_source_pages(path: str) -> list[dict[str, Any]]:
+    """
+    Reads document pages preserving layout, text blocks, embedded vector drawings, and raster images.
+    """
     p = Path(path)
     suffix = p.suffix.lower()
     pages = []
@@ -18,11 +21,20 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         for i, page in enumerate(doc):
             text = page.get_text("text")
             page_num = i + 1
+            blocks = page.get_text("blocks")
+            images = page.get_images()
+            drawings = page.get_drawings()
+            has_visual = (len(images) > 0) or (len(drawings) > 0)
+
             if text and text.strip():
                 pages.append({
                     "page_number": page_num,
                     "type": "text",
-                    "content": text
+                    "content": text,
+                    "blocks": blocks,
+                    "has_visual": has_visual,
+                    "images_count": len(images),
+                    "drawings_count": len(drawings)
                 })
             else:
                 # Scanned or image-based PDF page -> Render to PNG bytes
@@ -31,7 +43,10 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
                 pages.append({
                     "page_number": page_num,
                     "type": "image",
-                    "content": img_bytes
+                    "content": img_bytes,
+                    "has_visual": True,
+                    "images_count": len(images) or 1,
+                    "drawings_count": 0
                 })
         doc.close()
 
@@ -40,7 +55,10 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         pages.append({
             "page_number": 1,
             "type": "image",
-            "content": img_bytes
+            "content": img_bytes,
+            "has_visual": True,
+            "images_count": 1,
+            "drawings_count": 0
         })
 
     elif suffix == ".txt":
@@ -48,7 +66,10 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         pages.append({
             "page_number": 1,
             "type": "text",
-            "content": text
+            "content": text,
+            "has_visual": False,
+            "images_count": 0,
+            "drawings_count": 0
         })
 
     elif suffix == ".csv":
@@ -58,7 +79,10 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
             "page_number": 1,
             "type": "dataframe",
             "df": df,
-            "content": csv_text
+            "content": csv_text,
+            "has_visual": False,
+            "images_count": 0,
+            "drawings_count": 0
         })
 
     elif suffix in {".xlsx", ".xls"}:
@@ -69,7 +93,10 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
                 "page_number": 1,
                 "type": "dataframe",
                 "df": df,
-                "content": f"[Sheet: {sheet_name}]\n{csv_text}"
+                "content": f"[Sheet: {sheet_name}]\n{csv_text}",
+                "has_visual": False,
+                "images_count": 0,
+                "drawings_count": 0
             })
 
     elif suffix == ".docx":
@@ -80,7 +107,10 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         pages.append({
             "page_number": 1,
             "type": "text",
-            "content": text
+            "content": text,
+            "has_visual": False,
+            "images_count": 0,
+            "drawings_count": 0
         })
 
     else:

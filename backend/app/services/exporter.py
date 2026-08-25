@@ -11,7 +11,7 @@ def export_to_csv(questions: list[dict], columns: list[str]) -> BytesIO:
         rows.append({col: q.get(col, "") for col in columns})
     df = pd.DataFrame(rows, columns=columns)
     buf = BytesIO()
-    df.to_csv(buf, index=False, encoding="utf-8-sig")
+    df.to_csv(buf, index=False, encoding="utf-8")
     buf.seek(0)
     return buf
 

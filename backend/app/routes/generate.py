@@ -161,10 +161,12 @@ async def upload_source(file: UploadFile = File(...)):
     path = await save_upload(file)
     try:
         questions = parse_source_document(path)
+        stats = questions[0].get("extraction_stats") if questions and "extraction_stats" in questions[0] else {}
         return {
             "source_filename": file.filename,
             "source_type": Path(file.filename or "").suffix.lstrip("."),
-            "questions": questions
+            "questions": questions,
+            "statistics": stats
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse source document: {e}")

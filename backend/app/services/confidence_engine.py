@@ -13,10 +13,12 @@ def calculate_evidence_based_confidence(
     is_solvable: bool = True,
     solver_answer: str | None = None,
     source_answer: str | None = None,
+    vote_agreement_ratio: float | None = None,
 ) -> tuple[float, str]:
     """
-    Synthesizes an evidence-based confidence score (0.00 - 1.00) from 8 distinct signals.
+    Synthesizes an evidence-based confidence score (0.00 - 1.00) from distinct signals.
     Does NOT use self-reported LLM confidence.
+    Optionally factors in vote_agreement_ratio from self-consistency voting when tie-breaking was required.
     
     Returns:
         (confidence_score, confidence_level)
@@ -49,7 +51,14 @@ def calculate_evidence_based_confidence(
     if critic_agrees:
         score += 0.15
     else:
-        score -= 0.25  # Critic rejected solver reasoning
+        score -= 0.25  # Independent blind passes disagreed
+
+    # 3b. Self-consistency majority vote agreement (if tie-breaking was triggered)
+    if vote_agreement_ratio is not None:
+        if vote_agreement_ratio >= 0.8:
+            score += 0.10  # Strong consensus among multiple samples
+        elif vote_agreement_ratio <= 0.5:
+            score -= 0.15  # Weak / split consensus
 
     # 4. Extraction & Option quality weight
     ext_factor = max(0.0, min(1.0, extraction_confidence))

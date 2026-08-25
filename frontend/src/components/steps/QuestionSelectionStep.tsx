@@ -231,10 +231,20 @@ export default function QuestionSelectionStep({
               />
 
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px", flexWrap: "wrap" }}>
                   <strong style={{ color: isSelected ? "var(--primary-hover)" : "var(--text-primary)", fontSize: "0.88rem" }}>
-                    Q{idx + 1}
+                    {q.sequence_id || `Q${idx + 1}`}
                   </strong>
+                  {q.question_type && (
+                    <span className="badge secondary" style={{ fontSize: "0.65rem", padding: "1px 6px" }}>
+                      {q.question_type}
+                    </span>
+                  )}
+                  {q.section && q.section !== "General" && (
+                    <span className="badge warning" style={{ fontSize: "0.65rem", padding: "1px 6px" }}>
+                      {q.section}
+                    </span>
+                  )}
                   {q.source_page && (
                     <span className="badge info" style={{ fontSize: "0.65rem", padding: "1px 6px" }}>
                       Page {q.source_page}
