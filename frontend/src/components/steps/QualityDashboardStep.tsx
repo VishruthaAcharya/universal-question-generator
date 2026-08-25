@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo } from "react";
-import { QuestionRow, AssessmentBatchConfig } from "../../types";
+import { QuestionRow, AssessmentBatchConfig, AIValidationResult } from "../../types";
 import {
   QualityIcon,
   CheckCircleIcon,
@@ -31,36 +31,43 @@ export default function QualityDashboardStep({
   const stats = useMemo(() => {
     let valid = 0;
     let conflicts = 0;
+    let highConfidence = 0;
+    let medConfidence = 0;
     let lowConfidence = 0;
-    let inferred = 0;
-    let userEdited = 0;
+    let uncertain = 0;
+    let totalConfidenceSum = 0;
 
     questions.forEach((q) => {
-      if (q.validation.valid) {
-        valid++;
-      } else {
+      const aiVal: AIValidationResult | undefined = q.validation?.ai_validation;
+      const conf = aiVal?.confidence ?? (q.validation?.valid ? 0.95 : 0.60);
+      totalConfidenceSum += conf;
+
+      const isConflict =
+        aiVal?.validation_status === "ANSWER_CONFLICT" ||
+        !q.validation?.valid ||
+        (q.source_answer && q.ai_answer && q.source_answer.toUpperCase() !== q.ai_answer.toUpperCase());
+
+      if (isConflict) {
         conflicts++;
+      } else {
+        valid++;
       }
 
-      const fields = q.source_metadata?.fields || {};
-      let isLowConf = false;
-      let isInferred = false;
-      let isEdited = false;
-
-      Object.values(fields).forEach((f) => {
-        if (f.origin === "inferred") isInferred = true;
-        if (f.origin === "user_edited") isEdited = true;
-        if (f.confidence < 0.7 && f.confidence > 0) isLowConf = true;
-      });
-
-      if (isInferred) inferred++;
-      if (isEdited) userEdited++;
-      if (isLowConf) lowConfidence++;
+      if (conf >= 0.95) {
+        highConfidence++;
+      } else if (conf >= 0.85) {
+        medConfidence++;
+      } else if (conf >= 0.70) {
+        lowConfidence++;
+      } else {
+        uncertain++;
+      }
     });
 
-    const qualityScore = questions.length > 0
-      ? Math.round((valid / questions.length) * 100)
-      : 0;
+    const overallValidationConfidence =
+      questions.length > 0
+        ? Math.round((totalConfidenceSum / questions.length) * 100)
+        : 0;
 
     const isGateReady = questions.length > 0 && conflicts === 0;
 
@@ -68,10 +75,11 @@ export default function QualityDashboardStep({
       total: questions.length,
       valid,
       conflicts,
+      highConfidence,
+      medConfidence,
       lowConfidence,
-      inferred,
-      userEdited,
-      qualityScore,
+      uncertain,
+      overallValidationConfidence,
       isGateReady,
     };
   }, [questions]);
@@ -84,7 +92,7 @@ export default function QualityDashboardStep({
             <QualityIcon size={22} color="var(--primary-hover)" /> Step 7: Menntr Quality Gate & Assessment Health Dashboard
           </div>
           <div className="card-subtitle">
-            Comprehensive audit of assessment integrity, schema compliance, answer key validation, and export readiness.
+            Comprehensive audit of assessment integrity, schema compliance, multi-stage answer key validation, and export readiness.
           </div>
         </div>
         <span className="badge info">Step 07 / 08</span>
@@ -130,7 +138,7 @@ export default function QualityDashboardStep({
             <div style={{ fontSize: "0.84rem", color: "var(--text-secondary)", marginTop: "4px" }}>
               {stats.isGateReady
                 ? "Zero blocking conflicts detected. Assessment batch conforms with Menntr delivery specifications."
-                : `${stats.conflicts} blocking validation conflict(s) remain unresolved. Correction required prior to export.`}
+                : `${stats.conflicts} blocking validation conflict(s) remain unresolved. Manual review or resolution required prior to export.`}
             </div>
           </div>
         </div>
@@ -151,35 +159,35 @@ export default function QualityDashboardStep({
         </div>
 
         <div className="metric-card">
-          <div className="metric-title" style={{ color: "var(--accent)" }}>Validated & Passed</div>
-          <div className="metric-value" style={{ color: "var(--accent)" }}>{stats.valid}</div>
-          <div className="metric-foot">100% schema compliant</div>
+          <div className="metric-title" style={{ color: "var(--accent)" }}>High Confidence</div>
+          <div className="metric-value" style={{ color: "var(--accent)" }}>{stats.highConfidence}</div>
+          <div className="metric-foot">95% – 100% confidence</div>
         </div>
 
         <div className="metric-card">
-          <div className="metric-title" style={{ color: "var(--danger)" }}>Answer Conflicts</div>
-          <div className="metric-value" style={{ color: "var(--danger)" }}>{stats.conflicts}</div>
-          <div className="metric-foot">Requires human correction</div>
+          <div className="metric-title" style={{ color: "var(--primary-hover)" }}>Medium Confidence</div>
+          <div className="metric-value" style={{ color: "var(--primary-hover)" }}>{stats.medConfidence}</div>
+          <div className="metric-foot">85% – 94% confidence</div>
         </div>
 
         <div className="metric-card">
           <div className="metric-title" style={{ color: "var(--warning)" }}>Low Confidence</div>
           <div className="metric-value" style={{ color: "var(--warning)" }}>{stats.lowConfidence}</div>
-          <div className="metric-foot">Confidence &lt; 70%</div>
+          <div className="metric-foot">70% – 84% confidence</div>
         </div>
 
         <div className="metric-card">
-          <div className="metric-title" style={{ color: "var(--purple)" }}>AI Inferred</div>
-          <div className="metric-value" style={{ color: "var(--purple)" }}>{stats.inferred}</div>
-          <div className="metric-foot">Metadata synthesized</div>
+          <div className="metric-title" style={{ color: "var(--danger)" }}>Answer Conflicts</div>
+          <div className="metric-value" style={{ color: "var(--danger)" }}>{stats.conflicts}</div>
+          <div className="metric-foot">Source / AI discrepancies</div>
         </div>
 
         <div className="metric-card">
-          <div className="metric-title">Quality Health Score</div>
-          <div className="metric-value" style={{ color: stats.qualityScore >= 90 ? "var(--accent)" : stats.qualityScore >= 70 ? "var(--warning)" : "var(--danger)" }}>
-            {stats.qualityScore}%
+          <div className="metric-title">Validation Confidence</div>
+          <div className="metric-value" style={{ color: stats.overallValidationConfidence >= 85 ? "var(--accent)" : "var(--warning)" }}>
+            {stats.overallValidationConfidence}%
           </div>
-          <div className="metric-foot">Menntr Index Rating</div>
+          <div className="metric-foot">Evidence confidence rating</div>
         </div>
       </div>
 
@@ -200,18 +208,18 @@ export default function QualityDashboardStep({
         <ul className="list-unstyled">
           <li style={{ color: stats.conflicts === 0 ? "var(--accent)" : "var(--danger)" }}>
             <span>{stats.conflicts === 0 ? <CheckIcon size={14} /> : <XIcon size={14} />}</span>
-            <strong>Schema Completeness:</strong>
+            <strong>Answer Key Integrity:</strong>
             {stats.conflicts === 0
-              ? "All required fields (Question Stem, Options, Answers) are strictly populated."
-              : `${stats.conflicts} question(s) missing mandatory schema values.`}
+              ? "All question answer keys verified with zero unresolved conflicts."
+              : `${stats.conflicts} question(s) flagged with answer conflicts between source and AI solver.`}
           </li>
 
-          <li style={{ color: stats.lowConfidence === 0 ? "var(--accent)" : "var(--warning)" }}>
-            <span>{stats.lowConfidence === 0 ? <CheckIcon size={14} /> : <AlertTriangleIcon size={14} />}</span>
-            <strong>Confidence Thresholds:</strong>
-            {stats.lowConfidence === 0
-              ? "All extraction and inference fields meet confidence threshold."
-              : `${stats.lowConfidence} field(s) flagged with lower extraction confidence.`}
+          <li style={{ color: stats.uncertain === 0 ? "var(--accent)" : "var(--warning)" }}>
+            <span>{stats.uncertain === 0 ? <CheckIcon size={14} /> : <AlertTriangleIcon size={14} />}</span>
+            <strong>Validation Certainty:</strong>
+            {stats.uncertain === 0
+              ? "All questions meet minimum reliability thresholds."
+              : `${stats.uncertain} question(s) require human review due to ambiguity, visual dependency, or low confidence.`}
           </li>
 
           <li style={{ color: "var(--accent)" }}>

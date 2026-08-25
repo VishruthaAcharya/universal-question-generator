@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = Field("2024-12-01-preview", validation_alias="AZURE_OPENAI_API_VERSION")
     backend_url: str = Field("http://localhost:8000", validation_alias="BACKEND_URL")
     max_upload_size_mb: int = Field(50, validation_alias="MAX_UPLOAD_SIZE_MB")
+    max_ai_concurrency: int = Field(4, validation_alias="MAX_AI_CONCURRENCY")
+    enable_extraction_cache: bool = Field(True, validation_alias="ENABLE_EXTRACTION_CACHE")
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

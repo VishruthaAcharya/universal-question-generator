@@ -108,7 +108,9 @@ export async function mapQuestions(
   templateId: string,
   questions: Record<string, any>[],
   sourceFilename: string,
-  sourceType: string
+  sourceType: string,
+  subject: string = "General",
+  context: Record<string, any> = {}
 ) {
   const res = await fetch(`${API}/api/map`, {
     method: "POST",
@@ -118,6 +120,8 @@ export async function mapQuestions(
       questions,
       source_filename: sourceFilename,
       source_type: sourceType,
+      subject,
+      context,
     }),
   });
   const data = await res.json();
@@ -146,6 +150,29 @@ export async function updateQuestion(questionId: string, payload: Record<string,
   return data as QuestionRow;
 }
 
+export async function validateAnswers(
+  questions: Record<string, any>[],
+  subject: string = "General",
+  context: Record<string, any> = {},
+  questionSetId?: string
+) {
+  const res = await fetch(`${API}/api/validate-answers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      questions,
+      subject,
+      context,
+      question_set_id: questionSetId,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "AI Answer Validation failed");
+  }
+  return data as { results: any[] };
+}
+
 export async function exportQuestionSet(questionSetId: string, format: "csv" | "xlsx") {
   const res = await fetch(`${API}/api/export`, {
     method: "POST",
@@ -158,3 +185,4 @@ export async function exportQuestionSet(questionSetId: string, format: "csv" | "
   }
   return await res.blob();
 }
+

@@ -1,5 +1,7 @@
 import json
 import base64
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from openai import AzureOpenAI
 from app.config import settings
@@ -18,6 +20,20 @@ def get_client() -> AzureOpenAI:
         azure_endpoint=settings.azure_openai_endpoint,
         azure_deployment=settings.azure_openai_deployment_name
     )
+
+def _call_azure_with_retry(client: AzureOpenAI, create_kwargs: dict[str, Any], max_retries: int = 3, base_delay: float = 1.0):
+    """Executes chat completion with exponential backoff on rate-limit (429) or transient errors."""
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(**create_kwargs)
+        except Exception as e:
+            err_str = str(e)
+            is_transient = "429" in err_str or "503" in err_str or "500" in err_str or "rate limit" in err_str.lower()
+            if is_transient and attempt < max_retries - 1:
+                sleep_time = base_delay * (2 ** attempt)
+                time.sleep(sleep_time)
+            else:
+                raise
 
 SYSTEM_PROMPT = """You are a highly precise semantic question extraction assistant.
 Your task is to extract questions and answers from the provided source material and structure them.
@@ -59,14 +75,17 @@ SOURCE TEXT:
 {text}
 """
     try:
-        response = client.chat.completions.create(
-            model=settings.azure_openai_deployment_name,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ]
+        response = _call_azure_with_retry(
+            client,
+            {
+                "model": settings.azure_openai_deployment_name,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ]
+            }
         )
         content = response.choices[0].message.content or "{}"
         payload = json.loads(content)
@@ -99,25 +118,28 @@ Return JSON in this format:
 }}
 """
     try:
-        response = client.chat.completions.create(
-            model=settings.azure_openai_deployment_name,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
+        response = _call_azure_with_retry(
+            client,
+            {
+                "model": settings.azure_openai_deployment_name,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ]
+                        ]
+                    }
+                ]
+            }
         )
         content = response.choices[0].message.content or "{}"
         payload = json.loads(content)
@@ -128,17 +150,23 @@ Return JSON in this format:
 def infer_missing_fields_and_map(extracted_questions: list[dict], template_schema: dict) -> list[dict]:
     """
     Takes questions and normalizes them against template columns.
-    Batches questions in chunks of 10 to safely support arbitrarily large question sets (e.g. 28+ questions).
+    Batches questions in chunks of 10 and processes chunks concurrently using bounded ThreadPoolExecutor.
+    Preserves exact order of mapped questions.
     """
     client = get_client()
     columns_info = template_schema.get("column_schema", [])
-    
-    all_mapped_questions = []
     chunk_size = 10
-    
-    for chunk_start in range(0, len(extracted_questions), chunk_size):
-        chunk = extracted_questions[chunk_start:chunk_start + chunk_size]
-        
+
+    chunks = [
+        (i, extracted_questions[i:i + chunk_size])
+        for i in range(0, len(extracted_questions), chunk_size)
+    ]
+
+    if not chunks:
+        return []
+
+    def process_chunk(chunk_info: tuple[int, list[dict]]) -> tuple[int, list[dict]]:
+        chunk_start, chunk = chunk_info
         prompt = f"""You are a question mapping and inference engine.
 You have a set of extracted question dictionaries, and a target template schema.
 Your task is to:
@@ -177,21 +205,37 @@ Return JSON in this format:
 }}
 """
         try:
-            response = client.chat.completions.create(
-                model=settings.azure_openai_deployment_name,
-                temperature=0.0,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": "You map fields and perform semantic inference with confidence scores."},
-                    {"role": "user", "content": prompt}
-                ]
+            response = _call_azure_with_retry(
+                client,
+                {
+                    "model": settings.azure_openai_deployment_name,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": "You map fields and perform semantic inference with confidence scores."},
+                        {"role": "user", "content": prompt}
+                    ]
+                }
             )
             content = response.choices[0].message.content or "{}"
             payload = json.loads(content)
-            mapped_chunk = payload.get("mapped_questions", [])
-            all_mapped_questions.extend(mapped_chunk)
+            return chunk_start, payload.get("mapped_questions", [])
         except Exception as e:
             raise AzureOpenAIError(f"Azure OpenAI mapping and inference failed: {e}")
+
+    max_workers = min(len(chunks), max(1, settings.max_ai_concurrency))
+    all_mapped_questions = []
+
+    if len(chunks) == 1:
+        _, mapped = process_chunk(chunks[0])
+        all_mapped_questions = mapped
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            chunk_results = list(executor.map(process_chunk, chunks))
+        # Ensure correct sequential ordering
+        chunk_results.sort(key=lambda x: x[0])
+        for _, mapped in chunk_results:
+            all_mapped_questions.extend(mapped)
 
     return all_mapped_questions
 
@@ -246,14 +290,17 @@ Return JSON in this format:
 }}
 """
     try:
-        response = client.chat.completions.create(
-            model=settings.azure_openai_deployment_name,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are a precise educational assessment metadata assistant."},
-                {"role": "user", "content": prompt}
-            ]
+        response = _call_azure_with_retry(
+            client,
+            {
+                "model": settings.azure_openai_deployment_name,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You are a precise educational assessment metadata assistant."},
+                    {"role": "user", "content": prompt}
+                ]
+            }
         )
         content = response.choices[0].message.content or "{}"
         payload = json.loads(content)

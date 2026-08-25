@@ -139,7 +139,13 @@ export default function Home() {
         templateId,
         activeQuestions,
         sourceData?.source_filename || sourceFile?.name || "source_file",
-        sourceData?.source_type || "pdf"
+        sourceData?.source_type || "pdf",
+        batchConfig.subject || "General",
+        {
+          gradeClass: batchConfig.gradeClass,
+          chapterTopic: batchConfig.chapterTopic,
+          questionType: batchConfig.questionType,
+        }
       );
       setQuestionSetId(result.question_set_id);
       setColumns(result.columns);

@@ -1,7 +1,12 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import type { QuestionRow, AssessmentBatchConfig, AIFillSuggestion } from "../../types";
+import type {
+  QuestionRow,
+  AssessmentBatchConfig,
+  NormalizedQuestionSuggestion,
+  NormalizedFieldSuggestion,
+} from "../../types";
 import { aiFillMissingFields } from "../../lib/api";
 import ReviewTable from "../ReviewTable";
 import AlertPanel from "../AlertPanel";
@@ -28,6 +33,145 @@ interface ReviewStepProps {
   onNext: () => void;
 }
 
+/**
+ * Robust normalizer for /ai-fill-fields response.
+ * Safely parses any response contract variant (nested objects, flat records, suggestions arrays, string values)
+ * into a typed NormalizedQuestionSuggestion structure.
+ */
+export function normalizeAISuggestions(
+  rawResponse: unknown,
+  targetQuestions: QuestionRow[],
+  columns: string[],
+  questionKey: string
+): NormalizedQuestionSuggestion[] {
+  if (!rawResponse || typeof rawResponse !== "object") return [];
+
+  let list: unknown[] = [];
+  const rawObj = rawResponse as Record<string, unknown>;
+
+  if (Array.isArray(rawObj.suggestions)) {
+    list = rawObj.suggestions;
+  } else if (Array.isArray(rawResponse)) {
+    list = rawResponse;
+  } else if (rawObj.fields && typeof rawObj.fields === "object") {
+    list = [rawObj];
+  } else {
+    list = [rawObj];
+  }
+
+  const result: NormalizedQuestionSuggestion[] = [];
+
+  list.forEach((item, itemIdx) => {
+    if (!item || typeof item !== "object") return;
+    const itemObj = item as Record<string, any>;
+
+    // Find matching question row from targetQuestions
+    let matchedQuestion = targetQuestions.find(
+      (q) =>
+        (itemObj.question_id && String(q.id) === String(itemObj.question_id)) ||
+        (itemObj.id && String(q.id) === String(itemObj.id))
+    );
+
+    if (!matchedQuestion && typeof itemObj.row_number === "number") {
+      matchedQuestion = targetQuestions.find((q) => q.row_number === itemObj.row_number);
+    }
+
+    if (!matchedQuestion && itemIdx < targetQuestions.length) {
+      matchedQuestion = targetQuestions[itemIdx];
+    }
+
+    const questionId = matchedQuestion?.id || itemObj.question_id || itemObj.id || `q-${itemIdx + 1}`;
+    const rowNumber = matchedQuestion?.row_number ?? (itemIdx + 1);
+    const questionPrompt =
+      matchedQuestion?.data_json?.[questionKey] ||
+      (matchedQuestion?.row_number ? `Question #${matchedQuestion.row_number}` : `Question #${itemIdx + 1}`);
+
+    const fieldsMap: Record<string, NormalizedFieldSuggestion> = {};
+
+    const addField = (fname: string, fval: any) => {
+      if (!fname || fval === null || fval === undefined) return;
+      let val = "";
+      let status: "AI_INFERRED" | "UNRESOLVED" = "AI_INFERRED";
+      let confidence = 0.95;
+      let reason: string | undefined;
+
+      if (typeof fval === "object") {
+        val = String(fval.value ?? fval.val ?? fval.text ?? "").trim();
+        status = fval.status === "UNRESOLVED" ? "UNRESOLVED" : "AI_INFERRED";
+        if (typeof fval.confidence === "number" && !isNaN(fval.confidence)) {
+          confidence = fval.confidence > 1 ? fval.confidence / 100 : fval.confidence;
+        }
+        if (typeof fval.reason === "string" && fval.reason.trim()) {
+          reason = fval.reason.trim();
+        }
+      } else if (typeof fval === "string" || typeof fval === "number") {
+        val = String(fval).trim();
+      }
+
+      if (val && val !== "null" && val !== "undefined" && status !== "UNRESOLVED") {
+        fieldsMap[fname] = {
+          fieldName: fname,
+          value: val,
+          status,
+          confidence: Math.min(1, Math.max(0, confidence)),
+          reason,
+          isEditing: false,
+          editValue: val,
+        };
+      }
+    };
+
+    // Case 1: item has a `fields` object
+    if (itemObj.fields && typeof itemObj.fields === "object" && !Array.isArray(itemObj.fields)) {
+      Object.entries(itemObj.fields).forEach(([fname, fval]) => {
+        addField(fname, fval);
+      });
+    }
+    // Case 2: item has a `suggestions` array
+    else if (Array.isArray(itemObj.suggestions)) {
+      itemObj.suggestions.forEach((subItem: any) => {
+        if (subItem && typeof subItem === "object") {
+          const fieldName = subItem.field || subItem.fieldName || subItem.name;
+          if (fieldName) addField(fieldName, subItem);
+        }
+      });
+    }
+    // Case 3: item is a single suggestion: { field: "Topic", value: "...", confidence: 0.95 }
+    else if (itemObj.field && (itemObj.value !== undefined || itemObj.val !== undefined)) {
+      addField(String(itemObj.field), itemObj);
+    }
+    // Case 4: item is flat object with field keys
+    else {
+      Object.entries(itemObj).forEach(([k, v]) => {
+        if (
+          ["question_id", "id", "row_number", "status", "validation", "source_metadata", "prompt"].includes(k)
+        ) {
+          return;
+        }
+        if (columns.includes(k) || (typeof v === "object" && v !== null && ("value" in v || "confidence" in v))) {
+          addField(k, v);
+        }
+      });
+    }
+
+    if (Object.keys(fieldsMap).length > 0) {
+      const existing = result.find((r) => r.questionId === questionId);
+      if (existing) {
+        existing.fields = { ...existing.fields, ...fieldsMap };
+      } else {
+        result.push({
+          questionId,
+          rowNumber,
+          questionPrompt,
+          fields: fieldsMap,
+        });
+      }
+    }
+  });
+
+  return result;
+}
+
 export default function ReviewStep({
   columns,
   questions,
@@ -47,23 +191,23 @@ export default function ReviewStep({
 
   // AI Fill States
   const [isAiFilling, setIsAiFilling] = useState(false);
-  const [aiSuggestions, setAiSuggestions] = useState<AIFillSuggestion[] | null>(null);
+  const [aiSuggestions, setAiSuggestions] = useState<NormalizedQuestionSuggestion[] | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [aiFillError, setAiFillError] = useState<string>("");
   const [aiSuccessNotice, setAiSuccessNotice] = useState<string>("");
 
   const filteredQuestions = useMemo(() => {
     return questions.filter((q) => {
-      const textMatch = Object.values(q.data_json).some((val) =>
-        String(val).toLowerCase().includes(searchQuery.toLowerCase())
+      const textMatch = Object.values(q.data_json || {}).some((val) =>
+        String(val || "").toLowerCase().includes(searchQuery.toLowerCase())
       );
       if (!textMatch) return false;
 
-      if (filterValidation === "valid" && !q.validation.valid) return false;
-      if (filterValidation === "invalid" && q.validation.valid) return false;
+      if (filterValidation === "valid" && !q.validation?.valid) return false;
+      if (filterValidation === "invalid" && q.validation?.valid) return false;
 
       if (filterOrigin !== "all") {
-        const hasMatchingFieldOrigin = Object.keys(q.data_json).some((col) => {
+        const hasMatchingFieldOrigin = Object.keys(q.data_json || {}).some((col) => {
           const origin = q.source_metadata?.fields?.[col]?.origin;
           return origin === filterOrigin;
         });
@@ -95,7 +239,7 @@ export default function ReviewStep({
     if (!currentQuestion) return [];
     const missing: string[] = [];
     columns.forEach((col) => {
-      const val = (currentQuestion.data_json[col] || "").trim();
+      const val = (currentQuestion.data_json?.[col] || "").trim();
       const isCoreStemOrOpt = [questionKey, optAKey, optBKey, optCKey, optDKey, answerKey].includes(col);
       if (!val && !isCoreStemOrOpt) {
         missing.push(col);
@@ -104,11 +248,23 @@ export default function ReviewStep({
     return missing;
   }, [currentQuestion, columns, questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
 
+  // Suggestions specifically for current question
+  const currentQuestionSuggestions = useMemo(() => {
+    if (!currentQuestion || !aiSuggestions) return null;
+    return aiSuggestions.find((s) => s.questionId === currentQuestion.id) || null;
+  }, [currentQuestion, aiSuggestions]);
+
   // Handle Triggering "✨ Fill Missing Fields with AI"
   const handleTriggerAIFill = async (targetQuestionOnly: boolean = false) => {
-    const questionsToProcess = targetQuestionOnly && currentQuestion
-      ? [currentQuestion.data_json]
-      : questions.map((q) => q.data_json);
+    const targetQuestions =
+      targetQuestionOnly && currentQuestion ? [currentQuestion] : questions;
+
+    const questionsToProcess = targetQuestions.map((q) => ({
+      id: q.id,
+      question_id: q.id,
+      row_number: q.row_number,
+      ...(q.data_json || {}),
+    }));
 
     // Identify all missing metadata fields across target
     const fieldsToTarget: string[] = [];
@@ -117,56 +273,183 @@ export default function ReviewStep({
       if (!isCore) fieldsToTarget.push(col);
     });
 
-    if (fieldsToTarget.length === 0 || questionsToProcess.length === 0) return;
+    if (fieldsToTarget.length === 0 || questionsToProcess.length === 0) {
+      setAiSuccessNotice("No eligible missing metadata fields found to infill.");
+      return;
+    }
 
     setIsAiFilling(true);
     setAiFillError("");
     setAiSuccessNotice("");
+
     try {
       const res = await aiFillMissingFields(questionsToProcess, fieldsToTarget, {
-        subject: batchConfig.subject,
-        gradeClass: batchConfig.gradeClass,
-        chapterTopic: batchConfig.chapterTopic,
-        questionType: batchConfig.questionType,
+        subject: batchConfig.subject || "General",
+        gradeClass: batchConfig.gradeClass || "General",
+        chapterTopic: batchConfig.chapterTopic || "General",
+        questionType: batchConfig.questionType || "Multiple Choice (MCQ)",
       });
-      setAiSuggestions(res.suggestions);
-      setPreviewOpen(true);
+
+      const normalized = normalizeAISuggestions(res, targetQuestions, columns, questionKey);
+
+      if (normalized.length === 0 || normalized.every((q) => Object.keys(q.fields).length === 0)) {
+        setAiSuggestions(null);
+        setPreviewOpen(false);
+        setAiSuccessNotice("No eligible missing fields were found for AI inference.");
+      } else {
+        setAiSuggestions(normalized);
+        setPreviewOpen(true);
+      }
     } catch (e) {
-      setAiFillError(e instanceof Error ? e.message : "AI Infill failed");
+      let safeMsg = "AI field inference failed. Please try again.";
+      if (e instanceof Error && e.message) {
+        const clean = e.message.replace(/https?:\/\/[^\s]+/g, "").replace(/[a-zA-Z0-9]{32,}/g, "***");
+        if (clean.length < 150) {
+          safeMsg = clean;
+        }
+      }
+      setAiFillError(safeMsg);
     } finally {
       setIsAiFilling(false);
     }
   };
 
-  // Accept all suggestions
-  const handleAcceptAllSuggestions = () => {
-    if (!aiSuggestions) return;
-    aiSuggestions.forEach((sug, i) => {
-      const q = questions[i];
-      if (q) {
-        Object.entries(sug.fields).forEach(([fname, fval]) => {
-          if (fval.value && fval.status === "AI_INFERRED") {
-            onCellChange(q.id, fname, fval.value);
-          }
-        });
-      }
-    });
-    setPreviewOpen(false);
-    setAiSuccessNotice(`Successfully applied AI metadata suggestions across ${aiSuggestions.length} questions.`);
-  };
-
   // Accept single field suggestion
-  const handleAcceptField = (questionIndex: number, fieldName: string, value: string) => {
-    const q = questions[questionIndex];
-    if (q && value) {
-      onCellChange(q.id, fieldName, value);
-      // Remove from pending suggestions
-      if (aiSuggestions && aiSuggestions[questionIndex]) {
-        const updated = [...aiSuggestions];
-        delete updated[questionIndex].fields[fieldName];
+  const handleAcceptField = (questionId: string, fieldName: string, value: string) => {
+    if (!questionId || !fieldName || !value) return;
+
+    // Apply to authoritative question data
+    onCellChange(questionId, fieldName, value);
+
+    // Remove from pending suggestions
+    if (aiSuggestions) {
+      const updated = aiSuggestions
+        .map((qs) => {
+          if (qs.questionId === questionId) {
+            const nextFields = { ...qs.fields };
+            delete nextFields[fieldName];
+            return { ...qs, fields: nextFields };
+          }
+          return qs;
+        })
+        .filter((qs) => Object.keys(qs.fields).length > 0);
+
+      if (updated.length === 0) {
+        setAiSuggestions(null);
+        setPreviewOpen(false);
+        setAiSuccessNotice(`Accepted AI suggestion for ${fieldName}. All suggestions processed.`);
+      } else {
         setAiSuggestions(updated);
       }
     }
+  };
+
+  // Reject single field suggestion
+  const handleRejectField = (questionId: string, fieldName: string) => {
+    if (!aiSuggestions) return;
+
+    const updated = aiSuggestions
+      .map((qs) => {
+        if (qs.questionId === questionId) {
+          const nextFields = { ...qs.fields };
+          delete nextFields[fieldName];
+          return { ...qs, fields: nextFields };
+        }
+        return qs;
+      })
+      .filter((qs) => Object.keys(qs.fields).length > 0);
+
+    if (updated.length === 0) {
+      setAiSuggestions(null);
+      setPreviewOpen(false);
+    } else {
+      setAiSuggestions(updated);
+    }
+  };
+
+  // Toggle field editing mode in preview modal
+  const handleToggleEdit = (questionId: string, fieldName: string, isEditing: boolean) => {
+    if (!aiSuggestions) return;
+    setAiSuggestions((prev) =>
+      prev
+        ? prev.map((qs) => {
+            if (qs.questionId === questionId && qs.fields[fieldName]) {
+              return {
+                ...qs,
+                fields: {
+                  ...qs.fields,
+                  [fieldName]: {
+                    ...qs.fields[fieldName],
+                    isEditing,
+                    editValue: qs.fields[fieldName].value,
+                  },
+                },
+              };
+            }
+            return qs;
+          })
+        : null
+    );
+  };
+
+  // Change edited value in preview modal
+  const handleEditValueChange = (questionId: string, fieldName: string, val: string) => {
+    if (!aiSuggestions) return;
+    setAiSuggestions((prev) =>
+      prev
+        ? prev.map((qs) => {
+            if (qs.questionId === questionId && qs.fields[fieldName]) {
+              return {
+                ...qs,
+                fields: {
+                  ...qs.fields,
+                  [fieldName]: {
+                    ...qs.fields[fieldName],
+                    editValue: val,
+                  },
+                },
+              };
+            }
+            return qs;
+          })
+        : null
+    );
+  };
+
+  // Save edited value and accept
+  const handleSaveAndAcceptEdit = (questionId: string, fieldName: string) => {
+    if (!aiSuggestions) return;
+    const targetQ = aiSuggestions.find((qs) => qs.questionId === questionId);
+    const field = targetQ?.fields[fieldName];
+    const finalVal = (field?.editValue ?? field?.value ?? "").trim();
+    if (finalVal) {
+      handleAcceptField(questionId, fieldName, finalVal);
+    }
+  };
+
+  // Accept all suggestions across all questions
+  const handleAcceptAllSuggestions = () => {
+    if (!aiSuggestions || aiSuggestions.length === 0) return;
+
+    let appliedCount = 0;
+    aiSuggestions.forEach((qs) => {
+      Object.entries(qs.fields).forEach(([fname, fval]) => {
+        if (fval.value && fval.status === "AI_INFERRED") {
+          onCellChange(qs.questionId, fname, fval.value);
+          appliedCount += 1;
+        }
+      });
+    });
+
+    setAiSuggestions(null);
+    setPreviewOpen(false);
+    setAiSuccessNotice(`Successfully applied ${appliedCount} AI metadata suggestion${appliedCount === 1 ? "" : "s"}.`);
+  };
+
+  // Reject all suggestions and close modal
+  const handleRejectAllAndClose = () => {
+    setAiSuggestions(null);
+    setPreviewOpen(false);
   };
 
   return (
@@ -248,9 +531,9 @@ export default function ReviewStep({
               <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>
                 Question {currentIndex + 1} of {questions.length}
               </span>
-              <span className={`badge ${currentQuestion.validation.valid ? "success" : "danger"}`} style={{ gap: "4px" }}>
-                {currentQuestion.validation.valid ? <CheckIcon size={12} /> : <XIcon size={12} />}
-                {currentQuestion.validation.valid ? "VALID" : "ISSUES FOUND"}
+              <span className={`badge ${currentQuestion.validation?.valid ? "success" : "danger"}`} style={{ gap: "4px" }}>
+                {currentQuestion.validation?.valid ? <CheckIcon size={12} /> : <XIcon size={12} />}
+                {currentQuestion.validation?.valid ? "VALID" : "ISSUES FOUND"}
               </span>
               {currentQuestion.source_metadata?.source_page && (
                 <span className="badge info">Page {currentQuestion.source_metadata.source_page}</span>
@@ -265,7 +548,7 @@ export default function ReviewStep({
                 disabled={isAiFilling}
                 style={{ padding: "6px 14px", fontSize: "0.82rem", gap: "6px" }}
               >
-                <SparklesIcon size={15} /> ✨ Fill Missing Fields with AI
+                <SparklesIcon size={15} /> {isAiFilling ? "Inferring Missing Fields..." : "✨ Fill Missing Fields with AI"}
               </button>
 
               <div style={{ display: "flex", gap: "6px" }}>
@@ -294,36 +577,120 @@ export default function ReviewStep({
             {/* Left Column: SOURCE CONTEXT & AI INFILL HUB */}
             <div className="studio-source-panel">
               <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "0.9rem", color: "var(--text-primary)" }}>
-                <FileTextIcon size={16} color="var(--primary-hover)" /> Source Extraction Context
-              </div>
-
-              <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>
-                Document: <strong style={{ color: "var(--text-primary)" }}>{sourceFilename || "Source Ingested"}</strong>
-              </div>
-
-              <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>
-                Source Page: <strong style={{ color: "var(--text-primary)" }}>
-                  {currentQuestion.source_metadata?.source_page ? `Page ${currentQuestion.source_metadata.source_page}` : "Extracted Section"}
-                </strong>
-              </div>
-
-              {/* Authoritative Source Answer vs AI Answer */}
-              <div style={{ background: "rgba(0,0,0,0.25)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-subtle)" }}>
-                <div style={{ fontSize: "0.74rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 700, marginBottom: "6px" }}>
-                  Answer Integrity Check
+              {/* Cross-Page Traceability & Source Context */}
+              <div style={{ background: "rgba(0,0,0,0.2)", padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: "4px" }}>
+                <div style={{ fontSize: "0.76rem", color: "var(--text-secondary)" }}>
+                  Document: <strong style={{ color: "var(--text-primary)" }}>{sourceFilename || "Source Ingested"}</strong>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.84rem" }}>
-                  <span>Source Answer:</span>
-                  <strong style={{ color: currentQuestion.data_json[answerKey] ? "var(--text-primary)" : "var(--danger)" }}>
-                    {currentQuestion.data_json[answerKey] || "MISSING"}
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.76rem" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>Question Location:</span>
+                  <strong style={{ color: "var(--text-primary)" }}>
+                    {currentQuestion.source_metadata?.source_page ? `Page ${currentQuestion.source_metadata.source_page}` : "Extracted Section"}
                   </strong>
                 </div>
+                {currentQuestion.answer_page && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.76rem" }}>
+                    <span style={{ color: "var(--text-secondary)" }}>Answer Key Location:</span>
+                    <strong style={{ color: "var(--accent)" }}>
+                      Page {currentQuestion.answer_page} ({currentQuestion.answer_section || "Answer Key"})
+                    </strong>
+                  </div>
+                )}
+                {currentQuestion.mapping_confidence !== undefined && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.74rem", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "4px", marginTop: "2px" }}>
+                    <span style={{ color: "var(--text-muted)" }}>Mapping Trace:</span>
+                    <span style={{ color: currentQuestion.mapping_confidence >= 0.90 ? "var(--accent)" : "var(--warning)" }}>
+                      {currentQuestion.answer_source || "EXPLICIT_ANSWER_KEY"} · {(currentQuestion.mapping_confidence * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                )}
+                {currentQuestion.mapping_reason && (
+                  <div style={{ fontSize: "0.70rem", color: "var(--text-muted)", fontStyle: "italic", lineHeight: "1.3" }}>
+                    {currentQuestion.mapping_reason}
+                  </div>
+                )}
+              </div>
+
+              {/* Authoritative Source Answer vs AI Answer & Conflict Resolution Hub */}
+              <div style={{ background: "rgba(0,0,0,0.25)", padding: "14px", borderRadius: "10px", border: "1px solid var(--border-subtle)" }}>
+                <div style={{ fontSize: "0.74rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 700, marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
+                  <span>Answer Parity & AI Confidence</span>
+                  {currentQuestion.validation?.ai_validation?.confidence !== undefined && (
+                    <span style={{ color: "var(--primary-hover)" }}>
+                      {(currentQuestion.validation.ai_validation.confidence * 100).toFixed(0)}% AI Confidence
+                    </span>
+                  )}
+                </div>
+
+                {/* Source Answer Row */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.84rem", marginBottom: "6px" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>
+                    Source Key {currentQuestion.answer_page ? `(p. ${currentQuestion.answer_page})` : ""}:
+                  </span>
+                  <strong style={{ color: (currentQuestion.source_answer || currentQuestion.data_json?.[answerKey]) ? "var(--text-primary)" : "var(--danger)" }}>
+                    {currentQuestion.source_answer || currentQuestion.data_json?.[answerKey] || "MISSING"}
+                  </strong>
+                </div>
+
+                {/* AI Solution Row */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.84rem", marginBottom: "6px" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>AI Solution:</span>
+                  <strong style={{ color: "var(--primary-hover)" }}>
+                    {currentQuestion.ai_answer || currentQuestion.validation?.ai_validation?.ai_answer || "—"}
+                  </strong>
+                </div>
+
+                {/* Status Row */}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "4px" }}>
-                  <span>Status:</span>
-                  <span style={{ color: currentQuestion.validation.valid ? "var(--accent)" : "var(--danger)" }}>
-                    {currentQuestion.validation.valid ? "✓ Parity Verified" : "⚠ Conflict Detected"}
+                  <span>Parity Status:</span>
+                  <span style={{ color: currentQuestion.validation?.valid ? "var(--accent)" : "var(--danger)", fontWeight: 700 }}>
+                    {currentQuestion.validation?.valid ? "✓ Parity Verified" : "✕ Answer Conflict"}
                   </span>
                 </div>
+
+                {/* Rationale */}
+                {currentQuestion.validation?.ai_validation?.reason && (
+                  <div style={{ fontSize: "0.74rem", color: "var(--text-muted)", marginTop: "8px", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "6px", lineHeight: "1.4" }}>
+                    <em>{currentQuestion.validation.ai_validation.reason}</em>
+                  </div>
+                )}
+
+                {/* Conflict Resolution Actions */}
+                {(!currentQuestion.validation?.valid || (currentQuestion.source_answer && currentQuestion.ai_answer && currentQuestion.source_answer.toUpperCase() !== currentQuestion.ai_answer.toUpperCase())) && (
+                  <div style={{ marginTop: "12px", background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: "6px", padding: "8px" }}>
+                    <div style={{ fontSize: "0.72rem", color: "var(--danger)", fontWeight: 700, marginBottom: "6px" }}>
+                      Resolve Discrepancy:
+                    </div>
+                    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                      {currentQuestion.source_answer && (
+                        <button
+                          className="secondary"
+                          onClick={() => {
+                            if (currentQuestion.source_answer) {
+                              onCellChange(currentQuestion.id, answerKey, currentQuestion.source_answer);
+                            }
+                          }}
+                          style={{ padding: "3px 8px", fontSize: "0.72rem", flex: "1 1 auto" }}
+                        >
+                          Accept Source ({currentQuestion.source_answer})
+                        </button>
+                      )}
+                      {currentQuestion.ai_answer && (
+                        <button
+                          className="accent"
+                          onClick={() => {
+                            if (currentQuestion.ai_answer) {
+                              onCellChange(currentQuestion.id, answerKey, currentQuestion.ai_answer);
+                            }
+                          }}
+                          style={{ padding: "3px 8px", fontSize: "0.72rem", flex: "1 1 auto" }}
+                        >
+                          Accept AI ({currentQuestion.ai_answer})
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Missing Metadata & AI Infill Box */}
@@ -336,6 +703,46 @@ export default function ReviewStep({
                     <span className="badge warning">{currentMissingFields.length} Missing</span>
                   )}
                 </div>
+
+                {/* Inline Pending AI Suggestions for Current Question */}
+                {currentQuestionSuggestions && Object.keys(currentQuestionSuggestions.fields).length > 0 && (
+                  <div style={{ marginBottom: "14px", background: "rgba(124, 58, 237, 0.08)", border: "1px solid rgba(124, 58, 237, 0.3)", borderRadius: "8px", padding: "10px" }}>
+                    <div style={{ fontSize: "0.76rem", fontWeight: 700, color: "var(--primary-hover)", display: "flex", alignItems: "center", gap: "5px", marginBottom: "8px" }}>
+                      <SparklesIcon size={14} /> Pending AI Suggestions
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      {Object.entries(currentQuestionSuggestions.fields).map(([fname, fval]) => (
+                        <div key={fname} style={{ background: "rgba(0,0,0,0.3)", padding: "8px", borderRadius: "6px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--text-secondary)" }}>{fname}</span>
+                            <span style={{ fontSize: "0.68rem", color: "var(--warning)" }}>
+                              AI_INFERRED · {(fval.confidence * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                          <div style={{ fontWeight: 700, fontSize: "0.86rem", color: "var(--text-primary)", margin: "3px 0" }}>
+                            {fval.value}
+                          </div>
+                          <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
+                            <button
+                              className="accent"
+                              onClick={() => handleAcceptField(currentQuestion.id, fname, fval.value)}
+                              style={{ padding: "2px 8px", fontSize: "0.7rem" }}
+                            >
+                              Accept
+                            </button>
+                            <button
+                              className="secondary"
+                              onClick={() => handleRejectField(currentQuestion.id, fname)}
+                              style={{ padding: "2px 6px", fontSize: "0.7rem" }}
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {currentMissingFields.length > 0 ? (
                   <div style={{ marginBottom: "12px" }}>
@@ -353,7 +760,7 @@ export default function ReviewStep({
                       disabled={isAiFilling}
                       style={{ width: "100%", padding: "8px 12px", fontSize: "0.82rem", gap: "6px" }}
                     >
-                      <SparklesIcon size={14} /> ✨ Fill Missing Fields with AI
+                      <SparklesIcon size={14} /> {isAiFilling ? "Inferring..." : "✨ Fill Missing Fields with AI"}
                     </button>
                     <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: "6px", lineHeight: "1.4" }}>
                       AI will infer eligible missing fields from the source content. Review suggestions before applying.
@@ -375,7 +782,7 @@ export default function ReviewStep({
                   {columns.map((col) => {
                     const meta = currentQuestion.source_metadata?.fields?.[col];
                     const origin = meta?.origin || "extracted";
-                    const confidence = meta?.confidence ?? 1.0;
+                    const confidence = typeof meta?.confidence === "number" ? meta.confidence : 1.0;
 
                     return (
                       <div
@@ -408,7 +815,7 @@ export default function ReviewStep({
                 <label>Question Prompt / Stem ({questionKey})</label>
                 <textarea
                   rows={4}
-                  value={currentQuestion.data_json[questionKey] || ""}
+                  value={currentQuestion.data_json?.[questionKey] || ""}
                   onChange={(e) => onCellChange(currentQuestion.id, questionKey, e.target.value)}
                   placeholder="Enter question statement..."
                 />
@@ -421,7 +828,7 @@ export default function ReviewStep({
                     <label>{k}</label>
                     <input
                       type="text"
-                      value={currentQuestion.data_json[k] || ""}
+                      value={currentQuestion.data_json?.[k] || ""}
                       onChange={(e) => onCellChange(currentQuestion.id, k, e.target.value)}
                       placeholder={`Option ${String.fromCharCode(65 + idx)} text`}
                     />
@@ -436,7 +843,7 @@ export default function ReviewStep({
                     <label>Correct Answer Key (Authoritative)</label>
                     <input
                       type="text"
-                      value={currentQuestion.data_json[answerKey] || ""}
+                      value={currentQuestion.data_json?.[answerKey] || ""}
                       onChange={(e) => onCellChange(currentQuestion.id, answerKey, e.target.value)}
                       placeholder="e.g. A, B, Option 1..."
                     />
@@ -447,7 +854,7 @@ export default function ReviewStep({
                   <div>
                     <label>Difficulty Level</label>
                     <select
-                      value={currentQuestion.data_json[difficultyKey] || ""}
+                      value={currentQuestion.data_json?.[difficultyKey] || ""}
                       onChange={(e) => onCellChange(currentQuestion.id, difficultyKey, e.target.value)}
                     >
                       <option value="">— Select Difficulty —</option>
@@ -470,7 +877,7 @@ export default function ReviewStep({
                         <label>{col}</label>
                         <input
                           type="text"
-                          value={currentQuestion.data_json[col] || ""}
+                          value={currentQuestion.data_json?.[col] || ""}
                           onChange={(e) => onCellChange(currentQuestion.id, col, e.target.value)}
                         />
                       </div>
@@ -560,7 +967,7 @@ export default function ReviewStep({
               disabled={isAiFilling}
               style={{ padding: "10px 16px", fontSize: "0.85rem", gap: "6px" }}
             >
-              <SparklesIcon size={16} /> ✨ Fill Missing Fields with AI
+              <SparklesIcon size={16} /> {isAiFilling ? "Inferring Missing Fields..." : "✨ Fill Missing Fields with AI"}
             </button>
           </div>
 
@@ -573,7 +980,7 @@ export default function ReviewStep({
       )}
 
       {/* AI SUGGESTIONS PREVIEW MODAL */}
-      {previewOpen && aiSuggestions && (
+      {previewOpen && aiSuggestions && aiSuggestions.length > 0 && (
         <div
           style={{
             position: "fixed",
@@ -614,15 +1021,14 @@ export default function ReviewStep({
               </button>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px", margin: "16px 0" }}>
-              {aiSuggestions.map((sug, i) => {
-                const questionPrompt = questions[i]?.data_json[questionKey] || `Question #${i + 1}`;
-                const hasFields = Object.keys(sug.fields).length > 0;
-                if (!hasFields) return null;
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px", margin: "16px 0" }}>
+              {aiSuggestions.map((qs) => {
+                const fieldEntries = Object.entries(qs.fields || {});
+                if (fieldEntries.length === 0) return null;
 
                 return (
                   <div
-                    key={i}
+                    key={qs.questionId}
                     style={{
                       background: "var(--bg-surface)",
                       border: "1px solid var(--border-subtle)",
@@ -631,26 +1037,97 @@ export default function ReviewStep({
                     }}
                   >
                     <div style={{ fontWeight: 700, fontSize: "0.88rem", marginBottom: "6px", color: "var(--primary-hover)" }}>
-                      Q{i + 1}: <span style={{ color: "var(--text-primary)", fontWeight: 400 }}>{questionPrompt}</span>
+                      Q{qs.rowNumber}: <span style={{ color: "var(--text-primary)", fontWeight: 400 }}>{qs.questionPrompt}</span>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px", marginTop: "10px" }}>
-                      {Object.entries(sug.fields).map(([fname, fval]) => (
-                        <div key={fname} style={{ background: "rgba(0,0,0,0.25)", padding: "10px 12px", borderRadius: "6px", border: "1px solid var(--border-subtle)" }}>
-                          <div style={{ fontSize: "0.72rem", color: "var(--text-secondary)", fontWeight: 600 }}>{fname}</div>
-                          <div style={{ fontWeight: 700, fontSize: "0.92rem", color: "var(--text-primary)", margin: "4px 0" }}>
-                            {fval.value || "—"}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "12px", marginTop: "10px" }}>
+                      {fieldEntries.map(([fname, fval]) => (
+                        <div
+                          key={fname}
+                          style={{
+                            background: "rgba(0,0,0,0.25)",
+                            padding: "12px",
+                            borderRadius: "8px",
+                            border: "1px solid var(--border-subtle)",
+                            display: "flex",
+                            flexDirection: "column",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: "0.74rem", color: "var(--text-secondary)", fontWeight: 600, textTransform: "uppercase" }}>
+                              {fname}
+                            </div>
+
+                            {fval.isEditing ? (
+                              <div style={{ marginTop: "6px" }}>
+                                <input
+                                  type="text"
+                                  value={fval.editValue ?? fval.value}
+                                  onChange={(e) => handleEditValueChange(qs.questionId, fname, e.target.value)}
+                                  style={{ width: "100%", padding: "6px 8px", fontSize: "0.85rem", marginBottom: "6px" }}
+                                  autoFocus
+                                />
+                                <div style={{ display: "flex", gap: "6px" }}>
+                                  <button
+                                    className="accent"
+                                    onClick={() => handleSaveAndAcceptEdit(qs.questionId, fname)}
+                                    style={{ padding: "3px 8px", fontSize: "0.72rem" }}
+                                  >
+                                    Save & Accept
+                                  </button>
+                                  <button
+                                    className="secondary"
+                                    onClick={() => handleToggleEdit(qs.questionId, fname, false)}
+                                    style={{ padding: "3px 8px", fontSize: "0.72rem" }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <div style={{ fontWeight: 700, fontSize: "0.95rem", color: "var(--text-primary)", margin: "4px 0" }}>
+                                  {fval.value || "—"}
+                                </div>
+                                <div style={{ fontSize: "0.72rem", color: "var(--warning)", display: "flex", alignItems: "center", gap: "4px" }}>
+                                  <span>AI_INFERRED · {(Number(fval.confidence ?? 0.95) * 100).toFixed(0)}% confidence</span>
+                                </div>
+                                {fval.reason && (
+                                  <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "4px", fontStyle: "italic" }}>
+                                    {fval.reason}
+                                  </div>
+                                )}
+                              </>
+                            )}
                           </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.7rem", color: "var(--warning)" }}>
-                            <span>Confidence: {(fval.confidence * 100).toFixed(0)}%</span>
-                            <button
-                              className="accent"
-                              onClick={() => handleAcceptField(i, fname, fval.value)}
-                              style={{ padding: "2px 8px", fontSize: "0.7rem" }}
-                            >
-                              Accept
-                            </button>
-                          </div>
+
+                          {!fval.isEditing && (
+                            <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "8px" }}>
+                              <button
+                                className="accent"
+                                onClick={() => handleAcceptField(qs.questionId, fname, fval.value)}
+                                style={{ padding: "3px 10px", fontSize: "0.74rem" }}
+                              >
+                                Accept
+                              </button>
+                              <button
+                                className="secondary"
+                                onClick={() => handleToggleEdit(qs.questionId, fname, true)}
+                                style={{ padding: "3px 8px", fontSize: "0.74rem", gap: "3px" }}
+                              >
+                                <EditIcon size={12} /> Edit
+                              </button>
+                              <button
+                                className="secondary"
+                                onClick={() => handleRejectField(qs.questionId, fname)}
+                                style={{ padding: "3px 8px", fontSize: "0.74rem" }}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -660,7 +1137,7 @@ export default function ReviewStep({
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-subtle)", paddingTop: "18px" }}>
-              <button className="secondary" onClick={() => setPreviewOpen(false)}>
+              <button className="secondary" onClick={handleRejectAllAndClose}>
                 Reject All & Close
               </button>
 

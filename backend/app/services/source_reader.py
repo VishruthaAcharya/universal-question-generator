@@ -18,7 +18,7 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         for i, page in enumerate(doc):
             text = page.get_text("text")
             page_num = i + 1
-            if text.strip():
+            if text and text.strip():
                 pages.append({
                     "page_number": page_num,
                     "type": "text",
@@ -56,7 +56,8 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         csv_text = df.to_csv(index=False)
         pages.append({
             "page_number": 1,
-            "type": "text",
+            "type": "dataframe",
+            "df": df,
             "content": csv_text
         })
 
@@ -66,7 +67,8 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
             csv_text = df.to_csv(index=False)
             pages.append({
                 "page_number": 1,
-                "type": "text",
+                "type": "dataframe",
+                "df": df,
                 "content": f"[Sheet: {sheet_name}]\n{csv_text}"
             })
 
