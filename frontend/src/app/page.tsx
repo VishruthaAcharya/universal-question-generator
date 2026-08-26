@@ -71,6 +71,7 @@ export default function Home() {
   // UI States
   const [loading, setLoading] = useState(false);
   const [extractionProgress, setExtractionProgress] = useState<string>("");
+  const [mappingProgress, setMappingProgress] = useState<string>("");
   const [error, setError] = useState<string>("");
 
   // Handler: Selected Template from Registry or Custom Upload
@@ -133,6 +134,7 @@ export default function Home() {
     if (!templateId || selectedIndices.length === 0) return;
     setLoading(true);
     setError("");
+    setMappingProgress("Mapping source fields...");
     try {
       const activeQuestions = getSelectedQuestions();
       const result = await mapQuestions(
@@ -145,7 +147,8 @@ export default function Home() {
           gradeClass: batchConfig.gradeClass,
           chapterTopic: batchConfig.chapterTopic,
           questionType: batchConfig.questionType,
-        }
+        },
+        (msg) => setMappingProgress(msg)
       );
       setQuestionSetId(result.question_set_id);
       setColumns(result.columns);
@@ -155,6 +158,7 @@ export default function Home() {
       setError(e instanceof Error ? e.message : "Question mapping failed");
     } finally {
       setLoading(false);
+      setMappingProgress("");
     }
   }
 
@@ -285,13 +289,14 @@ export default function Home() {
         />
       )}
 
-      {/* Step 4: Schema Field Mapping (Informational Overview) */}
+      {/* Step 4: Schema Field Mapping & Compatibility */}
       {currentStep === "mapping" && compatibility && (
         <CompatibilityStep
           compatibility={compatibility}
           templateSchema={templateSchema}
           selectedQuestionsCount={selectedIndices.length}
           loading={loading}
+          mappingProgress={mappingProgress}
           onBack={() => setCurrentStep("selection")}
           onChangeTemplate={() => setCurrentStep("templates")}
           onProceedToMapping={proceedToMapping}
@@ -316,6 +321,7 @@ export default function Home() {
           sourceFilename={sourceData?.source_filename || sourceFile?.name || ""}
           batchConfig={batchConfig}
           onCellChange={handleCellChange}
+          onQuestionsUpdate={(updatedQuestions) => setQuestions(updatedQuestions)}
           onBack={() => setCurrentStep("validation")}
           onNext={() => setCurrentStep("quality")}
         />

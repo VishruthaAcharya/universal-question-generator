@@ -7,7 +7,7 @@ import type {
   NormalizedQuestionSuggestion,
   NormalizedFieldSuggestion,
 } from "../../types";
-import { aiFillMissingFields } from "../../lib/api";
+import { aiFillMissingFields, aiFillQuestionFields } from "../../lib/api";
 import ReviewTable from "../ReviewTable";
 import AlertPanel from "../AlertPanel";
 import {
@@ -29,6 +29,7 @@ interface ReviewStepProps {
   sourceFilename: string;
   batchConfig: AssessmentBatchConfig;
   onCellChange: (questionId: string, columnName: string, newValue: string) => void;
+  onQuestionsUpdate?: (updatedQuestions: QuestionRow[]) => void;
   onBack: () => void;
   onNext: () => void;
 }
@@ -178,11 +179,23 @@ export default function ReviewStep({
   sourceFilename,
   batchConfig,
   onCellChange,
+  onQuestionsUpdate,
   onBack,
   onNext,
 }: ReviewStepProps) {
   const [viewMode, setViewMode] = useState<"studio" | "grid">("studio");
   const [currentIndex, setCurrentIndex] = useState(0);
+
+  // Local mutable copy of questions — initializes from prop, updated by AI fill
+  // Individual cell changes still go through onCellChange → parent, but AI fill
+  // replaces full question objects locally for instant UI feedback.
+  const [localQuestions, setLocalQuestions] = useState<QuestionRow[]>(questions);
+
+  // Keep localQuestions in sync when parent passes new question data
+  // (e.g. after a PATCH from onCellChange completes)
+  React.useEffect(() => {
+    setLocalQuestions(questions);
+  }, [questions]);
 
   // Filters for Grid
   const [searchQuery, setSearchQuery] = useState("");
@@ -191,13 +204,15 @@ export default function ReviewStep({
 
   // AI Fill States
   const [isAiFilling, setIsAiFilling] = useState(false);
+  const [isBatchFilling, setIsBatchFilling] = useState(false);
+  const [batchFillProgress, setBatchFillProgress] = useState<string>("");
   const [aiSuggestions, setAiSuggestions] = useState<NormalizedQuestionSuggestion[] | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [aiFillError, setAiFillError] = useState<string>("");
   const [aiSuccessNotice, setAiSuccessNotice] = useState<string>("");
 
   const filteredQuestions = useMemo(() => {
-    return questions.filter((q) => {
+    return localQuestions.filter((q) => {
       const textMatch = Object.values(q.data_json || {}).some((val) =>
         String(val || "").toLowerCase().includes(searchQuery.toLowerCase())
       );
@@ -216,9 +231,9 @@ export default function ReviewStep({
 
       return true;
     });
-  }, [questions, searchQuery, filterValidation, filterOrigin]);
+  }, [localQuestions, searchQuery, filterValidation, filterOrigin]);
 
-  const currentQuestion = questions[currentIndex] || questions[0];
+  const currentQuestion = localQuestions[currentIndex] || localQuestions[0];
 
   const findColumnKey = (pattern: RegExp, fallback = "") => {
     return columns.find((c) => pattern.test(c)) || fallback;
@@ -233,6 +248,98 @@ export default function ReviewStep({
   const difficultyKey = findColumnKey(/difficulty|level/i, "Difficulty");
   const topicKey = findColumnKey(/topic|chapter/i, "Topic");
   const bloomsKey = findColumnKey(/bloom/i, "Bloom's Taxonomy");
+
+  // Distinct Answer Provenance & Decision State
+  const sourceAnswerVal = (
+    currentQuestion?.source_answer ||
+    currentQuestion?.source_metadata?.answer_source ||
+    ""
+  ).trim();
+
+  const aiAnswerVal = (
+    currentQuestion?.ai_answer ||
+    currentQuestion?.validation?.ai_validation?.ai_answer ||
+    ""
+  ).trim();
+
+  const finalAnswerVal = (
+    currentQuestion?.final_answer ||
+    currentQuestion?.data_json?.[answerKey] ||
+    sourceAnswerVal ||
+    aiAnswerVal ||
+    ""
+  ).trim();
+
+  const aiConfidenceVal =
+    typeof currentQuestion?.validation?.ai_validation?.confidence === "number"
+      ? currentQuestion.validation.ai_validation.confidence
+      : 0.98;
+
+  const isAnswerConflict = Boolean(
+    sourceAnswerVal &&
+    aiAnswerVal &&
+    sourceAnswerVal.toUpperCase() !== aiAnswerVal.toUpperCase()
+  );
+
+  const isMissingSource = !sourceAnswerVal;
+
+  const isMatchesSource = Boolean(
+    sourceAnswerVal &&
+    aiAnswerVal &&
+    sourceAnswerVal.toUpperCase() === aiAnswerVal.toUpperCase()
+  );
+
+  // Available options for Final Answer select dropdown
+  const availableOptionChoices = useMemo(() => {
+    if (!currentQuestion) return [];
+    const choices: { value: string; label: string }[] = [];
+
+    const letters = [
+      { key: optAKey, letter: "A" },
+      { key: optBKey, letter: "B" },
+      { key: optCKey, letter: "C" },
+      { key: optDKey, letter: "D" },
+    ];
+
+    letters.forEach(({ key, letter }) => {
+      const optVal = (currentQuestion.data_json?.[key] || "").trim();
+      if (optVal) {
+        choices.push({
+          value: letter,
+          label: `${letter}: ${optVal.length > 40 ? optVal.slice(0, 40) + "..." : optVal}`,
+        });
+      } else {
+        choices.push({ value: letter, label: `Option ${letter}` });
+      }
+    });
+
+    if (sourceAnswerVal && !["A", "B", "C", "D"].includes(sourceAnswerVal.toUpperCase())) {
+      if (!choices.some((c) => c.value.toLowerCase() === sourceAnswerVal.toLowerCase())) {
+        choices.push({ value: sourceAnswerVal, label: `Source: ${sourceAnswerVal}` });
+      }
+    }
+
+    if (aiAnswerVal && !["A", "B", "C", "D"].includes(aiAnswerVal.toUpperCase())) {
+      if (!choices.some((c) => c.value.toLowerCase() === aiAnswerVal.toLowerCase())) {
+        choices.push({ value: aiAnswerVal, label: `AI: ${aiAnswerVal}` });
+      }
+    }
+
+    if (
+      finalAnswerVal &&
+      !choices.some((c) => c.value.toLowerCase() === finalAnswerVal.toLowerCase())
+    ) {
+      choices.push({ value: finalAnswerVal, label: `Custom: ${finalAnswerVal}` });
+    }
+
+    return choices;
+  }, [currentQuestion, optAKey, optBKey, optCKey, optDKey, sourceAnswerVal, aiAnswerVal, finalAnswerVal]);
+
+  const handleSetFinalAnswer = (newAnswer: string) => {
+    if (!currentQuestion) return;
+    currentQuestion.final_answer = newAnswer;
+    onCellChange(currentQuestion.id, answerKey, newAnswer);
+  };
 
   // Identify missing metadata fields for current question
   const currentMissingFields = useMemo(() => {
@@ -254,64 +361,214 @@ export default function ReviewStep({
     return aiSuggestions.find((s) => s.questionId === currentQuestion.id) || null;
   }, [currentQuestion, aiSuggestions]);
 
-  // Handle Triggering "✨ Fill Missing Fields with AI"
-  const handleTriggerAIFill = async (targetQuestionOnly: boolean = false) => {
-    const targetQuestions =
-      targetQuestionOnly && currentQuestion ? [currentQuestion] : questions;
-
-    const questionsToProcess = targetQuestions.map((q) => ({
-      id: q.id,
-      question_id: q.id,
-      row_number: q.row_number,
-      ...(q.data_json || {}),
-    }));
-
-    // Identify all missing metadata fields across target
-    const fieldsToTarget: string[] = [];
-    columns.forEach((col) => {
-      const isCore = [questionKey, optAKey, optBKey, optCKey, optDKey, answerKey].includes(col);
-      if (!isCore) fieldsToTarget.push(col);
-    });
-
-    if (fieldsToTarget.length === 0 || questionsToProcess.length === 0) {
-      setAiSuccessNotice("No eligible missing metadata fields found to infill.");
-      return;
-    }
+  // ──────────────────────────────────────────────────────────────────────────────
+  // ONE-CLICK AI Fill for the current question
+  // The backend determines all missing fields, makes ONE focused AI call,
+  // atomically persists all resolved fields, and returns the complete updated question.
+  // ──────────────────────────────────────────────────────────────────────────────
+  const handleTriggerAIFillForCurrent = async () => {
+    if (!currentQuestion) return;
+    // Guard against duplicate simultaneous requests
+    if (isAiFilling || isBatchFilling) return;
 
     setIsAiFilling(true);
     setAiFillError("");
     setAiSuccessNotice("");
 
     try {
-      const res = await aiFillMissingFields(questionsToProcess, fieldsToTarget, {
+      // Single API call — backend resolves ALL missing fields atomically
+      const updatedQuestion = await aiFillQuestionFields(currentQuestion.id, {
         subject: batchConfig.subject || "General",
         gradeClass: batchConfig.gradeClass || "General",
         chapterTopic: batchConfig.chapterTopic || "General",
         questionType: batchConfig.questionType || "Multiple Choice (MCQ)",
       });
 
-      const normalized = normalizeAISuggestions(res, targetQuestions, columns, questionKey);
+      // Replace question in state with the complete updated object from backend
+      setLocalQuestions((prev) =>
+        prev.map((q) => (q.id === updatedQuestion.id ? updatedQuestion : q))
+      );
+      // Notify parent so other steps (Quality Dashboard, Export) see the update
+      onQuestionsUpdate?.([...localQuestions.map((q) =>
+        q.id === updatedQuestion.id ? updatedQuestion : q
+      )]);
 
-      if (normalized.length === 0 || normalized.every((q) => Object.keys(q.fields).length === 0)) {
-        setAiSuggestions(null);
-        setPreviewOpen(false);
-        setAiSuccessNotice("No eligible missing fields were found for AI inference.");
+      // Construct pending AI suggestions for fields that require review (under confidence threshold)
+      const pendingFields: Record<string, NormalizedFieldSuggestion> = {};
+      Object.entries(updatedQuestion.source_metadata?.fields || {}).forEach(([fname, fval]: [string, any]) => {
+        if (fval.review_required && fval.ai_suggestion) {
+          pendingFields[fname] = {
+            fieldName: fname,
+            value: fval.ai_suggestion,
+            status: "AI_INFERRED",
+            confidence: fval.confidence,
+            reason: fval.reason,
+            isEditing: false,
+            editValue: fval.ai_suggestion,
+          };
+        }
+      });
+
+      if (Object.keys(pendingFields).length > 0) {
+        const suggestionObj: NormalizedQuestionSuggestion = {
+          questionId: updatedQuestion.id,
+          rowNumber: updatedQuestion.row_number || 1,
+          questionPrompt: updatedQuestion.data_json?.[questionKey] || `Question #${updatedQuestion.row_number}`,
+          fields: pendingFields,
+        };
+        setAiSuggestions((prev) => {
+          const list = prev ? prev.filter((s) => s.questionId !== updatedQuestion.id) : [];
+          return [...list, suggestionObj];
+        });
       } else {
-        setAiSuggestions(normalized);
-        setPreviewOpen(true);
+        setAiSuggestions((prev) => prev ? prev.filter((s) => s.questionId !== updatedQuestion.id) : null);
+      }
+
+      // Compute remaining missing fields after fill for the success message
+      const coreFields = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
+      const answerKeywords = ["answer", "correct", "solution", "key"];
+      const stillMissing = columns.filter((col) => {
+        if (coreFields.has(col)) return false;
+        if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return false;
+        return !String(updatedQuestion.data_json?.[col] || "").trim();
+      });
+
+      const previousMissingCount = currentMissingFields.length;
+
+      if (stillMissing.length === 0 && previousMissingCount > 0) {
+        setAiSuccessNotice("✓ All eligible missing fields filled");
+      } else if (stillMissing.length < previousMissingCount) {
+        const reviewCount = stillMissing.length;
+        setAiSuccessNotice(`⚠ ${reviewCount} field${reviewCount === 1 ? "" : "s"} require review`);
+      } else if (previousMissingCount === 0) {
+        setAiSuccessNotice("All schema metadata fields are already populated.");
+      } else {
+        setAiSuccessNotice("No fields could be safely inferred. Review manually.");
       }
     } catch (e) {
       let safeMsg = "AI field inference failed. Please try again.";
       if (e instanceof Error && e.message) {
-        const clean = e.message.replace(/https?:\/\/[^\s]+/g, "").replace(/[a-zA-Z0-9]{32,}/g, "***");
-        if (clean.length < 150) {
-          safeMsg = clean;
-        }
+        const clean = e.message
+          .replace(/https?:\/\/[^\s]+/g, "")
+          .replace(/[a-zA-Z0-9]{32,}/g, "***");
+        if (clean.length < 200) safeMsg = clean;
       }
       setAiFillError(safeMsg);
     } finally {
       setIsAiFilling(false);
     }
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────────
+  // BATCH AI Fill — resolves missing fields for all questions sequentially
+  // Calls the per-question endpoint for each question in turn.
+  // ──────────────────────────────────────────────────────────────────────────────
+  const handleTriggerBatchAIFill = async () => {
+    if (localQuestions.length === 0) return;
+    if (isAiFilling || isBatchFilling) return;
+
+    setIsBatchFilling(true);
+    setAiFillError("");
+    setAiSuccessNotice("");
+    setBatchFillProgress("");
+
+    let totalResolved = 0;
+    let totalUnresolved = 0;
+    const context = {
+      subject: batchConfig.subject || "General",
+      gradeClass: batchConfig.gradeClass || "General",
+      chapterTopic: batchConfig.chapterTopic || "General",
+      questionType: batchConfig.questionType || "Multiple Choice (MCQ)",
+    };
+    const coreFieldSet = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
+    const answerKeywords = ["answer", "correct", "solution", "key"];
+
+    const updatedQuestions = [...localQuestions];
+
+    for (let i = 0; i < localQuestions.length; i++) {
+      const q = updatedQuestions[i];
+      setBatchFillProgress(`Processing question ${i + 1} of ${localQuestions.length}...`);
+
+      // Compute missing fields for this question
+      const missingCount = columns.filter((col) => {
+        if (coreFieldSet.has(col)) return false;
+        if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return false;
+        return !String(q.data_json?.[col] || "").trim();
+      }).length;
+
+      if (missingCount === 0) continue; // Skip questions with no missing fields
+
+      try {
+        const updatedQ = await aiFillQuestionFields(q.id, context);
+        updatedQuestions[i] = updatedQ;
+
+        // Count resolved fields
+        const stillMissing = columns.filter((col) => {
+          if (coreFieldSet.has(col)) return false;
+          if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return false;
+          return !String(updatedQ.data_json?.[col] || "").trim();
+        }).length;
+        totalResolved += missingCount - stillMissing;
+        totalUnresolved += stillMissing;
+      } catch {
+        // Non-fatal: log and continue to next question
+        totalUnresolved += missingCount;
+      }
+    }
+
+    // Collect all pending suggestions from the updated questions
+    const allPendingSuggestions: NormalizedQuestionSuggestion[] = [];
+    updatedQuestions.forEach((uq) => {
+      const pendingFields: Record<string, NormalizedFieldSuggestion> = {};
+      Object.entries(uq.source_metadata?.fields || {}).forEach(([fname, fval]: [string, any]) => {
+        if (fval.review_required && fval.ai_suggestion) {
+          pendingFields[fname] = {
+            fieldName: fname,
+            value: fval.ai_suggestion,
+            status: "AI_INFERRED",
+            confidence: fval.confidence,
+            reason: fval.reason,
+            isEditing: false,
+            editValue: fval.ai_suggestion,
+          };
+        }
+      });
+      if (Object.keys(pendingFields).length > 0) {
+        allPendingSuggestions.push({
+          questionId: uq.id,
+          rowNumber: uq.row_number || 1,
+          questionPrompt: uq.data_json?.[questionKey] || `Question #${uq.row_number}`,
+          fields: pendingFields,
+        });
+      }
+    });
+
+    setAiSuggestions((prev) => {
+      const batchIds = new Set(updatedQuestions.map((q) => q.id));
+      const list = prev ? prev.filter((s) => !batchIds.has(s.questionId)) : [];
+      return [...list, ...allPendingSuggestions];
+    });
+
+    // Apply all updates at once
+    setLocalQuestions(updatedQuestions);
+    onQuestionsUpdate?.(updatedQuestions);
+    setBatchFillProgress("");
+    setIsBatchFilling(false);
+
+    if (totalResolved > 0 && totalUnresolved === 0) {
+      setAiSuccessNotice(`✓ Batch complete: ${totalResolved} field${totalResolved === 1 ? "" : "s"} filled across all questions.`);
+    } else if (totalResolved > 0) {
+      setAiSuccessNotice(`✓ Batch complete: ${totalResolved} field${totalResolved === 1 ? "" : "s"} filled. ⚠ ${totalUnresolved} could not be safely inferred.`);
+    } else {
+      setAiSuccessNotice("No fields could be safely inferred for any question. Review manually.");
+    }
+  };
+
+  // Guard for batch fill: use localQuestions.length check
+  // (replaces the earlier `questions.length === 0` guard that used prop array)
+  const handleTriggerBatchAIFillGuarded = () => {
+    if (localQuestions.length === 0) return;
+    handleTriggerBatchAIFill();
   };
 
   // Accept single field suggestion
@@ -529,7 +786,7 @@ export default function ReviewStep({
           >
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
               <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>
-                Question {currentIndex + 1} of {questions.length}
+                Question {currentIndex + 1} of {localQuestions.length}
               </span>
               <span className={`badge ${currentQuestion.validation?.valid ? "success" : "danger"}`} style={{ gap: "4px" }}>
                 {currentQuestion.validation?.valid ? <CheckIcon size={12} /> : <XIcon size={12} />}
@@ -541,14 +798,19 @@ export default function ReviewStep({
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-              {/* Prominent Global AI Fill Action */}
+              {/* Prominent Global AI Fill Action — fills ALL questions */}
               <button
                 className="accent"
-                onClick={() => handleTriggerAIFill(false)}
-                disabled={isAiFilling}
+                onClick={handleTriggerBatchAIFillGuarded}
+                disabled={isAiFilling || isBatchFilling}
                 style={{ padding: "6px 14px", fontSize: "0.82rem", gap: "6px" }}
               >
-                <SparklesIcon size={15} /> {isAiFilling ? "Inferring Missing Fields..." : "✨ Fill Missing Fields with AI"}
+                <SparklesIcon size={15} />
+                {isBatchFilling
+                  ? (batchFillProgress || "Filling All Questions...")
+                  : isAiFilling
+                  ? "Filling..."
+                  : "✨ Fill All Missing Fields with AI"}
               </button>
 
               <div style={{ display: "flex", gap: "6px" }}>
@@ -562,8 +824,8 @@ export default function ReviewStep({
                 </button>
                 <button
                   className="secondary"
-                  disabled={currentIndex === questions.length - 1}
-                  onClick={() => setCurrentIndex((prev) => Math.min(questions.length - 1, prev + 1))}
+                  disabled={currentIndex === localQuestions.length - 1}
+                  onClick={() => setCurrentIndex((prev) => Math.min(localQuestions.length - 1, prev + 1))}
                   style={{ padding: "6px 12px", fontSize: "0.8rem", gap: "4px" }}
                 >
                   Next <ArrowRightIcon size={14} />
@@ -576,9 +838,8 @@ export default function ReviewStep({
           <div className="review-studio-container">
             {/* Left Column: SOURCE CONTEXT & AI INFILL HUB */}
             <div className="studio-source-panel">
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "0.9rem", color: "var(--text-primary)" }}>
               {/* Cross-Page Traceability & Source Context */}
-              <div style={{ background: "rgba(0,0,0,0.2)", padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: "4px" }}>
+              <div style={{ background: "rgba(0,0,0,0.2)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: "6px" }}>
                 <div style={{ fontSize: "0.76rem", color: "var(--text-secondary)" }}>
                   Document: <strong style={{ color: "var(--text-primary)" }}>{sourceFilename || "Source Ingested"}</strong>
                 </div>
@@ -607,88 +868,6 @@ export default function ReviewStep({
                 {currentQuestion.mapping_reason && (
                   <div style={{ fontSize: "0.70rem", color: "var(--text-muted)", fontStyle: "italic", lineHeight: "1.3" }}>
                     {currentQuestion.mapping_reason}
-                  </div>
-                )}
-              </div>
-
-              {/* Authoritative Source Answer vs AI Answer & Conflict Resolution Hub */}
-              <div style={{ background: "rgba(0,0,0,0.25)", padding: "14px", borderRadius: "10px", border: "1px solid var(--border-subtle)" }}>
-                <div style={{ fontSize: "0.74rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 700, marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
-                  <span>Answer Parity & AI Confidence</span>
-                  {currentQuestion.validation?.ai_validation?.confidence !== undefined && (
-                    <span style={{ color: "var(--primary-hover)" }}>
-                      {(currentQuestion.validation.ai_validation.confidence * 100).toFixed(0)}% AI Confidence
-                    </span>
-                  )}
-                </div>
-
-                {/* Source Answer Row */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.84rem", marginBottom: "6px" }}>
-                  <span style={{ color: "var(--text-secondary)" }}>
-                    Source Key {currentQuestion.answer_page ? `(p. ${currentQuestion.answer_page})` : ""}:
-                  </span>
-                  <strong style={{ color: (currentQuestion.source_answer || currentQuestion.data_json?.[answerKey]) ? "var(--text-primary)" : "var(--danger)" }}>
-                    {currentQuestion.source_answer || currentQuestion.data_json?.[answerKey] || "MISSING"}
-                  </strong>
-                </div>
-
-                {/* AI Solution Row */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.84rem", marginBottom: "6px" }}>
-                  <span style={{ color: "var(--text-secondary)" }}>AI Solution:</span>
-                  <strong style={{ color: "var(--primary-hover)" }}>
-                    {currentQuestion.ai_answer || currentQuestion.validation?.ai_validation?.ai_answer || "—"}
-                  </strong>
-                </div>
-
-                {/* Status Row */}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "4px" }}>
-                  <span>Parity Status:</span>
-                  <span style={{ color: currentQuestion.validation?.valid ? "var(--accent)" : "var(--danger)", fontWeight: 700 }}>
-                    {currentQuestion.validation?.valid ? "✓ Parity Verified" : "✕ Answer Conflict"}
-                  </span>
-                </div>
-
-                {/* Rationale */}
-                {currentQuestion.validation?.ai_validation?.reason && (
-                  <div style={{ fontSize: "0.74rem", color: "var(--text-muted)", marginTop: "8px", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "6px", lineHeight: "1.4" }}>
-                    <em>{currentQuestion.validation.ai_validation.reason}</em>
-                  </div>
-                )}
-
-                {/* Conflict Resolution Actions */}
-                {(!currentQuestion.validation?.valid || (currentQuestion.source_answer && currentQuestion.ai_answer && currentQuestion.source_answer.toUpperCase() !== currentQuestion.ai_answer.toUpperCase())) && (
-                  <div style={{ marginTop: "12px", background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: "6px", padding: "8px" }}>
-                    <div style={{ fontSize: "0.72rem", color: "var(--danger)", fontWeight: 700, marginBottom: "6px" }}>
-                      Resolve Discrepancy:
-                    </div>
-                    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                      {currentQuestion.source_answer && (
-                        <button
-                          className="secondary"
-                          onClick={() => {
-                            if (currentQuestion.source_answer) {
-                              onCellChange(currentQuestion.id, answerKey, currentQuestion.source_answer);
-                            }
-                          }}
-                          style={{ padding: "3px 8px", fontSize: "0.72rem", flex: "1 1 auto" }}
-                        >
-                          Accept Source ({currentQuestion.source_answer})
-                        </button>
-                      )}
-                      {currentQuestion.ai_answer && (
-                        <button
-                          className="accent"
-                          onClick={() => {
-                            if (currentQuestion.ai_answer) {
-                              onCellChange(currentQuestion.id, answerKey, currentQuestion.ai_answer);
-                            }
-                          }}
-                          style={{ padding: "3px 8px", fontSize: "0.72rem", flex: "1 1 auto" }}
-                        >
-                          Accept AI ({currentQuestion.ai_answer})
-                        </button>
-                      )}
-                    </div>
                   </div>
                 )}
               </div>
@@ -756,14 +935,17 @@ export default function ReviewStep({
 
                     <button
                       className="accent"
-                      onClick={() => handleTriggerAIFill(true)}
-                      disabled={isAiFilling}
+                      onClick={handleTriggerAIFillForCurrent}
+                      disabled={isAiFilling || isBatchFilling}
                       style={{ width: "100%", padding: "8px 12px", fontSize: "0.82rem", gap: "6px" }}
                     >
-                      <SparklesIcon size={14} /> {isAiFilling ? "Inferring..." : "✨ Fill Missing Fields with AI"}
+                      <SparklesIcon size={14} />
+                      {isAiFilling
+                        ? "✨ Filling Missing Fields..."
+                        : "✨ Fill Missing Fields with AI"}
                     </button>
                     <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: "6px", lineHeight: "1.4" }}>
-                      AI will infer eligible missing fields from the source content. Review suggestions before applying.
+                      AI will infer ALL eligible missing fields in one operation and update this question immediately.
                     </div>
                   </div>
                 ) : (
@@ -836,20 +1018,246 @@ export default function ReviewStep({
                 ))}
               </div>
 
-              {/* Answer & Difficulty */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px" }}>
-                {columns.includes(answerKey) && (
-                  <div>
-                    <label>Correct Answer Key (Authoritative)</label>
-                    <input
-                      type="text"
-                      value={currentQuestion.data_json?.[answerKey] || ""}
-                      onChange={(e) => onCellChange(currentQuestion.id, answerKey, e.target.value)}
-                      placeholder="e.g. A, B, Option 1..."
-                    />
-                  </div>
-                )}
+              {/* ANSWER VALIDATION & DECISION SECTION */}
+              <div
+                style={{
+                  background: "var(--bg-surface)",
+                  border: isAnswerConflict ? "1px solid rgba(239, 68, 68, 0.4)" : "1px solid var(--border-medium)",
+                  borderRadius: "12px",
+                  padding: "16px",
+                  marginTop: "6px",
+                  marginBottom: "6px",
+                }}
+              >
+                {/* Status Header */}
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: "14px",
+                    paddingBottom: "10px",
+                    borderBottom: "1px solid var(--border-subtle)",
+                    flexWrap: "wrap",
+                    gap: "8px",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
+                      Answer Validation
+                    </span>
 
+                    {isAnswerConflict ? (
+                      <span className="badge danger" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                        <AlertTriangleIcon size={12} /> Answer conflict detected
+                      </span>
+                    ) : isMissingSource ? (
+                      <span className="badge warning" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                        <SparklesIcon size={12} /> Source answer missing · AI suggested
+                      </span>
+                    ) : (
+                      <span className="badge success" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                        <CheckCircleIcon size={12} /> Answer matches source
+                      </span>
+                    )}
+                  </div>
+
+                  <span style={{ fontSize: "0.76rem", color: "var(--text-muted)" }}>
+                    AI Confidence: <strong style={{ color: "var(--primary-hover)" }}>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
+                  </span>
+                </div>
+
+                {/* 3 Pillars: Source Answer, AI Suggested Answer, Final Answer */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px" }}>
+                  
+                  {/* 1. Source Answer (Extracted) */}
+                  <div
+                    style={{
+                      background: "rgba(0, 0, 0, 0.25)",
+                      border: "1px solid var(--border-subtle)",
+                      borderRadius: "8px",
+                      padding: "12px",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                        <span style={{ fontSize: "0.74rem", fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase" }}>
+                          Source Answer
+                        </span>
+                        <span className={`badge ${sourceAnswerVal ? "success" : "danger"}`} style={{ fontSize: "0.68rem" }}>
+                          {sourceAnswerVal ? "EXTRACTED" : "MISSING"}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "1.05rem",
+                          fontWeight: 800,
+                          color: sourceAnswerVal ? "var(--text-primary)" : "var(--danger)",
+                          margin: "6px 0",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {sourceAnswerVal || "MISSING"}
+                      </div>
+                      <div style={{ fontSize: "0.70rem", color: "var(--text-muted)" }}>
+                        {currentQuestion.answer_page ? `Page ${currentQuestion.answer_page} · ${currentQuestion.answer_source || "Explicit Key"}` : "Extracted from source"}
+                      </div>
+                    </div>
+
+                    {isAnswerConflict && sourceAnswerVal && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => handleSetFinalAnswer(sourceAnswerVal)}
+                        style={{ marginTop: "10px", padding: "4px 8px", fontSize: "0.74rem", width: "100%", justifyContent: "center" }}
+                      >
+                        Use Source as Final
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 2. AI Suggested Answer */}
+                  <div
+                    style={{
+                      background: "rgba(124, 58, 237, 0.06)",
+                      border: "1px solid rgba(124, 58, 237, 0.3)",
+                      borderRadius: "8px",
+                      padding: "12px",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                        <span style={{ fontSize: "0.74rem", fontWeight: 600, color: "var(--primary-hover)", textTransform: "uppercase" }}>
+                          AI Suggested Answer
+                        </span>
+                        <span className="badge" style={{ background: "rgba(124, 58, 237, 0.2)", color: "var(--primary-hover)", fontSize: "0.68rem" }}>
+                          AI SUGGESTED
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "1.05rem",
+                          fontWeight: 800,
+                          color: "var(--primary-hover)",
+                          margin: "6px 0",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {aiAnswerVal || "—"}
+                      </div>
+                      <div style={{ fontSize: "0.70rem", color: "var(--text-muted)" }}>
+                        Confidence: <strong style={{ color: "var(--primary-hover)" }}>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
+                        {currentQuestion.validation?.ai_validation?.reason && (
+                          <div style={{ fontStyle: "italic", marginTop: "3px", fontSize: "0.68rem", lineHeight: "1.3" }}>
+                            {currentQuestion.validation.ai_validation.reason}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {isAnswerConflict && aiAnswerVal && (
+                      <button
+                        type="button"
+                        className="accent"
+                        onClick={() => handleSetFinalAnswer(aiAnswerVal)}
+                        style={{ marginTop: "10px", padding: "4px 8px", fontSize: "0.74rem", width: "100%", justifyContent: "center" }}
+                      >
+                        Use AI as Final
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 3. Final Answer (Export Decision) */}
+                  <div
+                    style={{
+                      background: "rgba(16, 185, 129, 0.06)",
+                      border: "1px solid rgba(16, 185, 129, 0.35)",
+                      borderRadius: "8px",
+                      padding: "12px",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                        <span style={{ fontSize: "0.74rem", fontWeight: 600, color: "var(--accent)", textTransform: "uppercase" }}>
+                          Final Answer
+                        </span>
+                        <span className="badge success" style={{ fontSize: "0.68rem" }}>
+                          FINAL
+                        </span>
+                      </div>
+
+                      {/* Dropdown Select */}
+                      <div style={{ marginTop: "6px" }}>
+                        <select
+                          value={finalAnswerVal}
+                          onChange={(e) => handleSetFinalAnswer(e.target.value)}
+                          style={{ width: "100%", padding: "6px 8px", fontSize: "0.88rem", fontWeight: 700, marginBottom: "6px" }}
+                        >
+                          <option value="">— Select Final Answer —</option>
+                          {availableOptionChoices.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+
+                        {/* Direct text input for custom editing */}
+                        <input
+                          type="text"
+                          value={finalAnswerVal}
+                          onChange={(e) => handleSetFinalAnswer(e.target.value)}
+                          placeholder="Or type custom final answer..."
+                          style={{ width: "100%", padding: "5px 8px", fontSize: "0.82rem", marginBottom: "6px" }}
+                        />
+
+                        {/* Quick Option Choice Buttons */}
+                        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                          {["A", "B", "C", "D"].map((letter) => (
+                            <button
+                              key={letter}
+                              type="button"
+                              className={finalAnswerVal.toUpperCase() === letter ? "primary" : "secondary"}
+                              onClick={() => handleSetFinalAnswer(letter)}
+                              style={{ padding: "2px 6px", fontSize: "0.72rem", flex: "1 1 0" }}
+                            >
+                              {letter}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {isAnswerConflict && (
+                      <button
+                        type="button"
+                        className="accent"
+                        onClick={() => {
+                          if (currentQuestion.validation) {
+                            currentQuestion.validation.valid = true;
+                          }
+                          handleSetFinalAnswer(finalAnswerVal || aiAnswerVal || sourceAnswerVal || "A");
+                        }}
+                        style={{ marginTop: "8px", padding: "4px 8px", fontSize: "0.74rem", width: "100%", justifyContent: "center", gap: "4px" }}
+                      >
+                        <CheckIcon size={12} /> Approve Final Answer
+                      </button>
+                    )}
+                  </div>
+
+                </div>
+              </div>
+
+              {/* Difficulty & Additional Schema Metadata Fields */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px", marginTop: "4px" }}>
                 {columns.includes(difficultyKey) && (
                   <div>
                     <label>Difficulty Level</label>
@@ -865,25 +1273,20 @@ export default function ReviewStep({
                     </select>
                   </div>
                 )}
-              </div>
 
-              {/* Metadata Fields (Topic, Bloom's, Score, etc.) */}
-              {columns.filter((c) => ![questionKey, optAKey, optBKey, optCKey, optDKey, answerKey, difficultyKey].includes(c)).length > 0 && (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
-                  {columns
-                    .filter((c) => ![questionKey, optAKey, optBKey, optCKey, optDKey, answerKey, difficultyKey].includes(c))
-                    .map((col) => (
-                      <div key={col}>
-                        <label>{col}</label>
-                        <input
-                          type="text"
-                          value={currentQuestion.data_json?.[col] || ""}
-                          onChange={(e) => onCellChange(currentQuestion.id, col, e.target.value)}
-                        />
-                      </div>
-                    ))}
-                </div>
-              )}
+                {columns
+                  .filter((c) => ![questionKey, optAKey, optBKey, optCKey, optDKey, answerKey, difficultyKey].includes(c) && !/answer|correct/i.test(c))
+                  .map((col) => (
+                    <div key={col}>
+                      <label>{col}</label>
+                      <input
+                        type="text"
+                        value={currentQuestion.data_json?.[col] || ""}
+                        onChange={(e) => onCellChange(currentQuestion.id, col, e.target.value)}
+                      />
+                    </div>
+                  ))}
+              </div>
 
               {/* Action Bar */}
               <div

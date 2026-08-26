@@ -262,6 +262,225 @@ Return JSON in this format:
 
     return all_mapped_questions
 
+AI_FILL_CONFIDENCE_THRESHOLD = 0.70  # Minimum confidence to auto-persist a field
+
+def fill_missing_fields_for_single_question(
+    question_data: dict[str, Any],
+    missing_fields: list[str],
+    template_schema: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """
+    Resolves ALL missing metadata fields for a single assessment question in ONE AI call.
+
+    Args:
+        question_data: The question's current data_json (column -> value mapping).
+        missing_fields: List of field names that are genuinely empty and need to be inferred.
+                        Only truly-empty fields should be passed — not all columns.
+        template_schema: The template column_schema list (for field type context).
+        context: Batch context (subject, gradeClass, chapterTopic, questionType).
+
+    Returns:
+        dict mapping field_name -> {value, status, confidence, reason}
+        Every field in missing_fields is guaranteed to have an entry.
+        Fields that could not be safely inferred have status="UNRESOLVED" and value=None.
+    """
+    if not missing_fields:
+        return {}
+
+    client = get_client()
+    ctx_info = context or {}
+
+    import logging
+    logger = logging.getLogger("ai_fill")
+
+    question_id_hint = question_data.get("id") or question_data.get("question_id") or "unknown"
+
+    logger.info(
+        "AI_FILL_REQUEST | question_id=%s | requested_fields=%s",
+        question_id_hint,
+        missing_fields,
+    )
+
+    # Build a field-type context string from template schema
+    schema_context = ""
+    if template_schema:
+        col_schema = template_schema.get("column_schema", [])
+        field_hints = []
+        for col in col_schema:
+            if col.get("original_name") in missing_fields:
+                hint = f"  - {col.get('original_name')}"
+                if col.get("example_value"):
+                    hint += f" (example: \"{col['example_value']}\")"
+                if col.get("required"):
+                    hint += " [REQUIRED]"
+                field_hints.append(hint)
+        if field_hints:
+            schema_context = "FIELD TYPE HINTS FROM TEMPLATE:\n" + "\n".join(field_hints) + "\n\n"
+
+    # Serialize the existing question data for context (mask the id fields)
+    question_context = {k: v for k, v in question_data.items()
+                        if k not in ("id", "question_id") and v not in (None, "", [])}
+
+    system_prompt = (
+        "You are a precise educational assessment metadata expert.\n"
+        "Your task is to infer missing metadata fields for a single assessment question.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Return a result for EVERY field listed in REQUESTED_FIELDS — no exceptions.\n"
+        "2. Do NOT omit any requested field from your response.\n"
+        "3. If a field can be reliably inferred from the question content and context, "
+        "set status to 'AI_INFERRED' with your best value and a confidence score.\n"
+        "4. If a field genuinely cannot be inferred without additional information, "
+        "set status to 'UNRESOLVED', value to null, and explain why in reason.\n"
+        "5. Do NOT fabricate information. Do NOT invent values to make the form look complete.\n"
+        "6. Do NOT assign generic default values (such as 'Medium' for difficulty, '1' for score, '60' for time limit) "
+        "unless they are actually defined or strongly justified by the question content, source material, or templates.\n"
+        "7. Preserve any source-derived information. Never overwrite source answers.\n"
+        "8. Base inferences only on the question text, options, subject, and context provided.\n"
+        "9. Confidence must be a float between 0.0 and 1.0 reflecting your certainty.\n"
+    )
+
+    prompt = f"""You are resolving ALL missing fields for a single assessment question in ONE complete operation.
+
+ASSESSMENT CONTEXT:
+Subject: {ctx_info.get('subject', 'General')}
+Grade/Class: {ctx_info.get('gradeClass', 'General')}
+Chapter/Topic: {ctx_info.get('chapterTopic', 'General')}
+Question Type: {ctx_info.get('questionType', 'General')}
+
+{schema_context}EXISTING QUESTION DATA (already populated fields — DO NOT overwrite these):
+{json.dumps(question_context, indent=2)}
+
+REQUESTED_FIELDS (you MUST return an entry for EVERY one of these):
+{json.dumps(missing_fields, indent=2)}
+
+INSTRUCTIONS:
+- Evaluate EACH requested field independently.
+- For each field: infer from question text, options, subject, context, and any available clues.
+- If you can confidently infer a value: status = "AI_INFERRED", provide value and confidence >= 0.70.
+- If you cannot safely infer: status = "UNRESOLVED", value = null, confidence < 0.70, explain in reason.
+- Do NOT use generic fallback default values (e.g. Difficulty = Medium) if there is no evidence to support them.
+- Return EXACTLY one entry per requested field. Never skip a field.
+
+Return ONLY this JSON structure (no other text):
+{{
+  "fields": {{
+    "<exact_field_name_from_REQUESTED_FIELDS>": {{
+      "value": "<inferred value or null>",
+      "status": "AI_INFERRED" | "UNRESOLVED",
+      "confidence": 0.0,
+      "reason": "<brief explanation of inference basis or why it cannot be inferred>"
+    }}
+  }}
+}}
+"""
+
+    try:
+        response = _call_azure_with_retry(
+            client,
+            {
+                "model": settings.azure_openai_deployment_name,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+        )
+        content = response.choices[0].message.content or "{}"
+        payload = json.loads(content)
+        raw_fields = payload.get("fields", {})
+
+        logger.info(
+            "AI_FILL_RESPONSE | question_id=%s | returned_fields=%s",
+            question_id_hint,
+            list(raw_fields.keys()),
+        )
+
+        # Helper to normalize key for robust matching
+        def clean_key(k: str) -> str:
+            return "".join(c for c in k.lower() if c.isalnum())
+
+        normalized_raw = {}
+        for rk, rv in raw_fields.items():
+            normalized_raw[clean_key(rk)] = rk
+
+        # Normalize and validate: ensure every requested field has an entry
+        result: dict[str, dict[str, Any]] = {}
+        resolved = []
+        unresolved = []
+
+        for field_name in missing_fields:
+            norm_field = clean_key(field_name)
+            matched_rk = None
+
+            # 1. Exact match
+            if field_name in raw_fields:
+                matched_rk = field_name
+            # 2. Normalized match
+            elif norm_field in normalized_raw:
+                matched_rk = normalized_raw[norm_field]
+            # 3. Fuzzy match: check if norm_field is part of any raw key or vice versa
+            else:
+                for nrk, rk in normalized_raw.items():
+                    if norm_field in nrk or nrk in norm_field:
+                        matched_rk = rk
+                        break
+
+            if matched_rk is not None:
+                entry = raw_fields[matched_rk]
+                value = entry.get("value")
+                status = entry.get("status", "UNRESOLVED")
+                confidence = float(entry.get("confidence", 0.0))
+                reason = entry.get("reason", "")
+
+                # Normalize value: treat empty string, "null", "undefined" as None
+                if value is not None:
+                    value = str(value).strip()
+                    if value.lower() in ("null", "undefined", "none", ""):
+                        value = None
+
+                # If value is None, force UNRESOLVED
+                if value is None:
+                    status = "UNRESOLVED"
+                    confidence = min(confidence, 0.5)
+
+                result[field_name] = {
+                    "value": value,
+                    "status": status,
+                    "confidence": round(min(1.0, max(0.0, confidence)), 4),
+                    "reason": reason,
+                }
+
+                if status == "AI_INFERRED" and value:
+                    resolved.append(field_name)
+                else:
+                    unresolved.append(field_name)
+            else:
+                # AI did not return this field at all — mark as UNRESOLVED
+                result[field_name] = {
+                    "value": None,
+                    "status": "UNRESOLVED",
+                    "confidence": 0.0,
+                    "reason": "Field was not returned by AI inference model.",
+                }
+                unresolved.append(field_name)
+
+        logger.info(
+            "AI_FILL_VALIDATION | question_id=%s | resolved=%s | unresolved=%s",
+            question_id_hint,
+            resolved,
+            unresolved,
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error("AI_FILL_ERROR | question_id=%s | error=%s", question_id_hint, str(e))
+        raise AzureOpenAIError(f"AI Fill Missing Fields (single question) failed: {e}")
+
+
 def fill_missing_fields_for_questions(
     questions: list[dict],
     fields_to_fill: list[str],
@@ -330,3 +549,81 @@ Return JSON in this format:
         return payload.get("suggestions", [])
     except Exception as e:
         raise AzureOpenAIError(f"AI Fill Missing Fields failed: {e}")
+
+def map_fields_via_ai(
+    source_fields: list[str],
+    target_fields: list[str],
+    context: dict[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
+    """
+    Calls Azure OpenAI to determine semantic mapping between unresolved source fields and target fields.
+    """
+    if not source_fields or not target_fields:
+        return {}
+
+    client = get_client()
+    ctx_info = context or {}
+
+    prompt = f"""You are a precise database schema mapping assistant.
+Your task is to map unresolved source fields from an extracted question structure to the target template columns.
+
+ASSESSMENT CONTEXT:
+Subject: {ctx_info.get('subject', 'General')}
+Question Type: {ctx_info.get('questionType', 'General')}
+
+UNRESOLVED SOURCE FIELDS:
+{json.dumps(source_fields, indent=2)}
+
+TARGET TEMPLATE COLUMNS:
+{json.dumps(target_fields, indent=2)}
+
+INSTRUCTIONS:
+1. Try to map each target column to the most semantically appropriate source field.
+2. Only suggest a mapping if there is a strong semantic relationship.
+3. For each mapped target column, assign a confidence score between 0.0 and 1.0.
+4. Do NOT map a target column if no source field fits.
+
+Return ONLY this JSON structure (no other text):
+{{
+  "mappings": [
+    {{
+      "source": "<source_field_name>",
+      "target": "<target_column_name>",
+      "confidence": 0.95
+    }}
+  ]
+}}
+"""
+    try:
+        response = _call_azure_with_retry(
+            client,
+            {
+                "model": settings.azure_openai_deployment_name,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You map unresolved database schema columns precisely."},
+                    {"role": "user", "content": prompt}
+                ]
+            }
+        )
+        content = response.choices[0].message.content or "{}"
+        payload = json.loads(content)
+        mappings_list = payload.get("mappings", [])
+        
+        result = {}
+        for m in mappings_list:
+            src = m.get("source")
+            tgt = m.get("target")
+            conf = float(m.get("confidence", 0.8))
+            if src and tgt:
+                result[tgt] = {
+                    "source": src,
+                    "confidence": conf
+                }
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("ai_mapping")
+        logger.error("AI_SEMANTIC_MAPPING_ERROR | error=%s", str(e))
+        return {}

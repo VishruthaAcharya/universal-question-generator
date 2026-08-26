@@ -51,10 +51,24 @@ NORMALIZATION_MAP = {
     "mark": "score"
 }
 
+from functools import lru_cache
+
 REQUIRED_CORE_FIELDS = {"question", "correct_answer", "starter_code", "test_cases", "option_1", "option_2", "option_3", "option_4"}
 
+def normalize_header(name: str) -> str:
+    """
+    Cleans and normalizes header name to strip BOM, trailing/leading whitespace,
+    repeated whitespace, and lowercase.
+    """
+    if not isinstance(name, str):
+        name = str(name)
+    cleaned = name.lstrip("\ufeff")
+    cleaned = "".join(cleaned.split()).lower()
+    return cleaned
+
+@lru_cache(maxsize=1024)
 def normalize_field_name(name: str) -> str:
-    cleaned = "".join(name.split()).lower()
+    cleaned = normalize_header(name)
     return NORMALIZATION_MAP.get(cleaned, cleaned)
 
 def read_template_schema(path: str) -> dict[str, Any]:
@@ -63,7 +77,7 @@ def read_template_schema(path: str) -> dict[str, Any]:
     sheet_name = None
 
     if suffix == ".csv":
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, encoding="utf-8-sig")
     elif suffix in {".xlsx", ".xls"}:
         excel_file = pd.ExcelFile(path)
         sheet_name = excel_file.sheet_names[0]
@@ -71,7 +85,17 @@ def read_template_schema(path: str) -> dict[str, Any]:
     else:
         raise ValueError("Template must be CSV or XLSX")
 
-    columns = [str(c).strip() for c in df.columns]
+    # Clean columns: strip BOM and surrounding whitespace
+    df.columns = [str(c).lstrip("\ufeff").strip() for c in df.columns]
+    columns = list(df.columns)
+    
+    # Verify and log root cause during development (Section 10)
+    if len(columns) > 0:
+        raw_first = str(columns[0])
+        norm_first = normalize_header(raw_first)
+        # Note: If it had a BOM, df.columns clean above would have stripped it, but for test/verification:
+        print(f"RAW FIRST HEADER: {repr(raw_first)}")
+        print(f"NORMALIZED FIRST HEADER: {repr(norm_first)}")
     
     # Analyze columns
     column_schema = []

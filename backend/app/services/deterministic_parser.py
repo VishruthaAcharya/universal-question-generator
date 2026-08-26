@@ -175,7 +175,7 @@ def extract_questions_from_dataframe(df: pd.DataFrame, page_number: int = 1) -> 
 
     col_map = {}
     for col in df.columns:
-        norm = "".join(str(col).split()).lower()
+        norm = "".join(str(col).lstrip("\ufeff").split()).lower()
         col_map[norm] = col
 
     q_col = col_map.get("question") or col_map.get("questiontext") or col_map.get("problemstatement") or col_map.get("prompt")
@@ -231,7 +231,9 @@ def extract_questions_from_dataframe(df: pd.DataFrame, page_number: int = 1) -> 
             "starter_code": "",
             "expected_output": "",
             "test_cases": "",
-            "source_page": page_number
+            "source_page": page_number,
+            # Retain original headers as keys (values can be empty but structure is retained)
+            **{str(c): row.get(c, "") for c in df.columns}
         })
 
     return questions

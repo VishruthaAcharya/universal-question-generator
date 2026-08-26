@@ -38,7 +38,7 @@ export default function BatchSetupStep({ config, onChange, onNext }: BatchSetupS
           <label>Assessment Batch Title *</label>
           <input
             type="text"
-            placeholder="e.g. Grade 10 CBSE Mathematics Periodic Test 1"
+            placeholder="e.g. Demo Assessment"
             value={config.assessmentName}
             onChange={(e) => updateField("assessmentName", e.target.value)}
           />
@@ -57,7 +57,7 @@ export default function BatchSetupStep({ config, onChange, onNext }: BatchSetupS
             <option value="Physics">Physics</option>
             <option value="Chemistry">Chemistry</option>
             <option value="Biology">Biology</option>
-            <option value="Science (General)">Science (General)</option>
+            <option value="Science">Science</option>
             <option value="English Language & Literature">English Language & Literature</option>
             <option value="Social Studies">Social Studies</option>
             <option value="Computer Science">Computer Science</option>
@@ -71,11 +71,6 @@ export default function BatchSetupStep({ config, onChange, onNext }: BatchSetupS
             value={config.gradeClass}
             onChange={(e) => updateField("gradeClass", e.target.value)}
           >
-            <option value="Class 6">Class 6 (Middle School)</option>
-            <option value="Class 7">Class 7 (Middle School)</option>
-            <option value="Class 8">Class 8 (Middle School)</option>
-            <option value="Class 9">Class 9 (Secondary)</option>
-            <option value="Class 10">Class 10 (Secondary)</option>
             <option value="Class 11">Class 11 (Senior Secondary)</option>
             <option value="Class 12">Class 12 (Senior Secondary)</option>
             <option value="Higher Ed / Competitive">Higher Ed / Competitive</option>
@@ -99,7 +94,6 @@ export default function BatchSetupStep({ config, onChange, onNext }: BatchSetupS
             onChange={(e) => updateField("questionType", e.target.value)}
           >
             <option value="Multiple Choice (MCQ Single Correct)">Multiple Choice (MCQ Single Correct)</option>
-            <option value="Multiple Response (Multi-Correct)">Multiple Response (Multi-Correct)</option>
             <option value="Assertion & Reasoning">Assertion & Reasoning</option>
             <option value="Fill in the Blanks">Fill in the Blanks</option>
             <option value="Numerical Value Type">Numerical Value Type</option>
@@ -116,8 +110,6 @@ export default function BatchSetupStep({ config, onChange, onNext }: BatchSetupS
             <option value="English">English</option>
             <option value="Hindi">Hindi</option>
             <option value="Bilingual (English + Regional)">Bilingual (English + Regional)</option>
-            <option value="Spanish">Spanish</option>
-            <option value="French">French</option>
           </select>
         </div>
       </div>

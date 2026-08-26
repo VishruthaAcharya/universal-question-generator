@@ -73,7 +73,8 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
         })
 
     elif suffix == ".csv":
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        df.columns = [str(c).lstrip("\ufeff").strip() for c in df.columns]
         csv_text = df.to_csv(index=False)
         pages.append({
             "page_number": 1,
@@ -88,6 +89,7 @@ def read_source_pages(path: str) -> list[dict[str, Any]]:
     elif suffix in {".xlsx", ".xls"}:
         sheets = pd.read_excel(path, sheet_name=None)
         for sheet_name, df in sheets.items():
+            df.columns = [str(c).lstrip("\ufeff").strip() for c in df.columns]
             csv_text = df.to_csv(index=False)
             pages.append({
                 "page_number": 1,

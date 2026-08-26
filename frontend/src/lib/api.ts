@@ -104,13 +104,36 @@ export async function aiFillMissingFields(
   return data as { suggestions: AIFillSuggestion[] };
 }
 
+/**
+ * ONE-CLICK complete missing-field resolution for a single question.
+ * The backend determines which fields are missing, makes ONE focused AI call,
+ * atomically persists all resolved fields, and returns the complete updated question.
+ */
+export async function aiFillQuestionFields(
+  questionId: string,
+  context: Record<string, any>
+): Promise<QuestionRow> {
+  const res = await fetch(`${API}/api/questions/${questionId}/ai-fill`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ context }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "AI fill question fields failed");
+  }
+  return data as QuestionRow;
+}
+
+
 export async function mapQuestions(
   templateId: string,
   questions: Record<string, any>[],
   sourceFilename: string,
   sourceType: string,
   subject: string = "General",
-  context: Record<string, any> = {}
+  context: Record<string, any> = {},
+  onProgress?: (msg: string) => void
 ) {
   const res = await fetch(`${API}/api/map`, {
     method: "POST",
@@ -124,16 +147,64 @@ export async function mapQuestions(
       context,
     }),
   });
-  const data = await res.json();
+
   if (!res.ok) {
+    const data = await res.json();
     throw new Error(data.detail || "Mapping failed");
   }
-  return data as {
-    question_set_id: string;
-    template_name: string;
-    columns: string[];
-    questions: QuestionRow[];
-  };
+
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  if (!reader) {
+    throw new Error("Response body is not readable");
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.type === "progress" && onProgress) {
+          onProgress(parsed.message);
+        } else if (parsed.type === "result") {
+          return parsed.data as {
+            question_set_id: string;
+            template_name: string;
+            columns: string[];
+            questions: QuestionRow[];
+          };
+        }
+      } catch (e) {
+        console.error("Failed to parse progress line:", e);
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const parsed = JSON.parse(buffer);
+      if (parsed.type === "result") {
+        return parsed.data as {
+          question_set_id: string;
+          template_name: string;
+          columns: string[];
+          questions: QuestionRow[];
+        };
+      }
+    } catch (e) {
+      console.error("Failed to parse remaining buffer:", e);
+    }
+  }
+
+  throw new Error("Mapping finished without returning a result");
 }
 
 export async function updateQuestion(questionId: string, payload: Record<string, string>) {

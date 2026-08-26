@@ -18,6 +18,7 @@ interface CompatibilityStepProps {
   templateSchema: TemplateSchema | null;
   selectedQuestionsCount: number;
   loading: boolean;
+  mappingProgress?: string;
   onBack: () => void;
   onChangeTemplate: () => void;
   onProceedToMapping: () => void;
@@ -28,6 +29,7 @@ export default function CompatibilityStep({
   templateSchema,
   selectedQuestionsCount,
   loading,
+  mappingProgress,
   onBack,
   onChangeTemplate,
   onProceedToMapping,
@@ -208,7 +210,7 @@ export default function CompatibilityStep({
           >
             {loading ? (
               <>
-                <span className="spinner">⚙️</span> Normalizing & Mapping Questions...
+                <span className="spinner">⚙️</span> {mappingProgress || "Normalizing & Mapping Questions..."}
               </>
             ) : (
               <>

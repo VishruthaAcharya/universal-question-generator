@@ -10,12 +10,14 @@ def validate_compatibility(template_schema: dict[str, Any], parsed_questions: li
     # Get all columns from template
     columns = template_schema.get("column_schema", [])
     
-    # Gather all non-empty fields present in the source (both original and normalized)
+    # Gather all fields present in the source (both original and normalized)
     source_fields = set()
     if parsed_questions:
         for q in parsed_questions:
             for k, v in q.items():
-                if v is not None and str(v).strip() != "":
+                if k not in ("options", "source_page"):
+                    # We add the field regardless of whether the cell value is empty or not
+                    # to validate structure separately from cell-value validation
                     source_fields.add(k)
                     source_fields.add(normalize_field_name(k))
 
@@ -24,8 +26,8 @@ def validate_compatibility(template_schema: dict[str, Any], parsed_questions: li
         norm = col["normalized_name"]
         is_required = col["required"]
         
-        # Check if the source contains this field
-        if norm not in source_fields and orig not in source_fields:
+        # Check if the source contains this field (fully normalized case-insensitive match)
+        if norm not in source_fields and normalize_field_name(orig) not in source_fields:
             if is_required:
                 # If it's a field we can't infer, it's a blocking error
                 if norm not in INFERRABLE_FIELDS:
