@@ -105,3 +105,53 @@ def test_xlsx_export_unaffected():
     assert header_vals == cols
     row2_vals = [cell.value for cell in ws[2]]
     assert row2_vals == ["What is the speed of light?", "3 × 10⁸ m/s", "Physics"]
+
+# 5. Regression Test: MCQ Export Column Mapping (Answer 1-4 to options, Correct Answer to answer key)
+def test_mcq_export_column_mapping_regression():
+    mcq_question = {
+        "question": "What is the capital of France?",
+        "options": ["Berlin", "Madrid", "Paris", "Rome"],
+        "correct_answer": "Paris",
+        "topic": "Geography",
+        "difficulty": "Easy",
+        "score": 1
+    }
+    cols = [
+        "Question",
+        "Answer 1",
+        "Answer 2",
+        "Answer 3",
+        "Answer 4",
+        "Correct Answer",
+        "Topic",
+        "Difficulty",
+        "Score"
+    ]
+    
+    # 1. Verify CSV Export
+    csv_buf = export_to_csv([mcq_question], cols)
+    df_csv = pd.read_csv(io.StringIO(csv_buf.getvalue().decode("utf-8")))
+    
+    assert list(df_csv.columns) == cols
+    assert df_csv.iloc[0]["Question"] == "What is the capital of France?"
+    assert df_csv.iloc[0]["Answer 1"] == "Berlin"
+    assert df_csv.iloc[0]["Answer 2"] == "Madrid"
+    assert df_csv.iloc[0]["Answer 3"] == "Paris"
+    assert df_csv.iloc[0]["Answer 4"] == "Rome"
+    assert df_csv.iloc[0]["Correct Answer"] == "Paris"
+    assert df_csv.iloc[0]["Topic"] == "Geography"
+    assert df_csv.iloc[0]["Difficulty"] == "Easy"
+    assert int(df_csv.iloc[0]["Score"]) == 1
+
+    # 2. Verify XLSX Export
+    xlsx_buf = export_to_xlsx([mcq_question], cols)
+    df_xlsx = pd.read_excel(xlsx_buf)
+    
+    assert list(df_xlsx.columns) == cols
+    assert df_xlsx.iloc[0]["Question"] == "What is the capital of France?"
+    assert df_xlsx.iloc[0]["Answer 1"] == "Berlin"
+    assert df_xlsx.iloc[0]["Answer 2"] == "Madrid"
+    assert df_xlsx.iloc[0]["Answer 3"] == "Paris"
+    assert df_xlsx.iloc[0]["Answer 4"] == "Rome"
+    assert df_xlsx.iloc[0]["Correct Answer"] == "Paris"
+

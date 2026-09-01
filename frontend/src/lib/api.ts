@@ -74,6 +74,124 @@ export async function uploadSource(file: File) {
   };
 }
 
+export async function uploadSourceTemp(file: File, batchId?: string) {
+  const form = new FormData();
+  form.append("file", file);
+  if (batchId) {
+    form.append("batch_id", batchId);
+  }
+
+  const res = await fetch(`${API}/api/sources/upload-temp`, {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "File upload failed");
+  }
+  return data as {
+    batch_id: string;
+    is_zip: boolean;
+    extracted_files: {
+      absolute_path: string;
+      parent_source: string | null;
+      source_file: string;
+      size_bytes: number;
+    }[];
+    unsupported_files: {
+      filename: string;
+      parent_source: string | null;
+      reason: string;
+    }[];
+  };
+}
+
+export async function processSourceBatch(
+  files: {
+    absolute_path: string;
+    parent_source: string | null;
+    source_file: string;
+    size_bytes: number;
+  }[],
+  onProgress?: (msg: string) => void
+) {
+  const res = await fetch(`${API}/api/sources/process-batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ files }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.detail || "Batch processing failed");
+  }
+
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  if (!reader) {
+    throw new Error("Response body is not readable");
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.type === "progress" && onProgress) {
+          onProgress(parsed.message);
+        } else if (parsed.type === "error") {
+          throw new Error(parsed.message);
+        } else if (parsed.type === "result") {
+          return parsed.data as {
+            source_filename: string;
+            source_type: string;
+            questions: Record<string, any>[];
+            statistics: Record<string, any>;
+            warning?: string | null;
+          };
+        }
+      } catch (e) {
+        if (e instanceof Error) {
+          throw e;
+        }
+        console.error("Failed to parse progress line:", e);
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const parsed = JSON.parse(buffer);
+      if (parsed.type === "error") {
+        throw new Error(parsed.message);
+      } else if (parsed.type === "result") {
+        return parsed.data as {
+          source_filename: string;
+          source_type: string;
+          questions: Record<string, any>[];
+          statistics: Record<string, any>;
+          warning?: string | null;
+        };
+      }
+    } catch (e) {
+      if (e instanceof Error) {
+        throw e;
+      }
+      console.error("Failed to parse remaining buffer:", e);
+    }
+  }
+
+  throw new Error("Batch processing finished without returning a result");
+}
+
 export async function checkCompatibility(templateId: string, questions: Record<string, any>[]) {
   const res = await fetch(`${API}/api/validate-compatibility`, {
     method: "POST",
@@ -244,11 +362,15 @@ export async function validateAnswers(
   return data as { results: any[] };
 }
 
-export async function exportQuestionSet(questionSetId: string, format: "csv" | "xlsx") {
+export async function exportQuestionSet(
+  questionSetId: string,
+  format: "csv" | "xlsx",
+  isDraft: boolean = false
+) {
   const res = await fetch(`${API}/api/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question_set_id: questionSetId, format }),
+    body: JSON.stringify({ question_set_id: questionSetId, format, is_draft: isDraft }),
   });
   if (!res.ok) {
     const data = await res.json();

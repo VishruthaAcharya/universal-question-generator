@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     backend_url: str = Field("http://localhost:8000", validation_alias="BACKEND_URL")
     max_upload_size_mb: int = Field(50, validation_alias="MAX_UPLOAD_SIZE_MB")
     max_ai_concurrency: int = Field(4, validation_alias="MAX_AI_CONCURRENCY")
+    max_single_file_size_mb: int = Field(25, validation_alias="MAX_SINGLE_FILE_SIZE_MB")
+    max_zip_size_mb: int = Field(50, validation_alias="MAX_ZIP_SIZE_MB")
+    max_zip_extracted_size_mb: int = Field(150, validation_alias="MAX_ZIP_EXTRACTED_SIZE_MB")
+    max_files_per_batch: int = Field(20, validation_alias="MAX_FILES_PER_BATCH")
     enable_extraction_cache: bool = Field(True, validation_alias="ENABLE_EXTRACTION_CACHE")
     confidence_calibration_log: bool = Field(False, validation_alias="CONFIDENCE_CALIBRATION_LOG")
     

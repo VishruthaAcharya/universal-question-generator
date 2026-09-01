@@ -9,6 +9,7 @@ import {
   AlertTriangleIcon,
   ArrowLeftIcon,
   FileTextIcon,
+  SparklesIcon,
 } from "../icons";
 
 interface ExportStepProps {
@@ -17,7 +18,7 @@ interface ExportStepProps {
   totalQuestions: number;
   hasValidationErrors: boolean;
   loading: boolean;
-  onExport: (format: "csv" | "xlsx") => Promise<void> | void;
+  onExport: (format: "csv" | "xlsx", isDraft?: boolean) => Promise<void> | void;
   onBack: () => void;
 }
 
@@ -32,10 +33,10 @@ export default function ExportStep({
 }: ExportStepProps) {
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
 
-  const handleDownload = async (format: "csv" | "xlsx") => {
+  const handleDownload = async (format: "csv" | "xlsx", isDraft: boolean = false) => {
     try {
-      await onExport(format);
-      setDownloadSuccess(format.toUpperCase());
+      await onExport(format, isDraft);
+      setDownloadSuccess(isDraft ? `Draft ${format.toUpperCase()}` : `Certified ${format.toUpperCase()}`);
     } catch (e) {
       // Error handled in parent
     }
@@ -46,13 +47,13 @@ export default function ExportStep({
       <div className="card-header-flex">
         <div>
           <div className="card-title">
-            <ExportIcon size={22} color="var(--primary-hover)" /> Step 8: Final Assessment Export & Publishing
+            <ExportIcon size={22} color="var(--primary-hover)" /> Step 6: Export & Publishing
           </div>
           <div className="card-subtitle">
             Export the reviewed and validated assessment items formatted strictly according to the Menntr target schema.
           </div>
         </div>
-        <span className="badge info">Step 08 / 08</span>
+        <span className="badge info">Step 06 / 06</span>
       </div>
 
       <div
@@ -107,7 +108,7 @@ export default function ExportStep({
             style={{ maxWidth: "600px", margin: "0 auto 24px auto", textAlign: "left" }}
           >
             <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
-              <AlertTriangleIcon size={16} /> <strong>Attention:</strong> Some questions contain unresolved warnings. Resolving them in the Human Review workspace is recommended prior to production delivery.
+              <AlertTriangleIcon size={16} /> <strong>Notice:</strong> Some questions contain non-blocking warnings. You may export a certified delivery file or download a draft export for offline inspection.
             </span>
           </AlertPanel>
         )}
@@ -123,41 +124,92 @@ export default function ExportStep({
           </AlertPanel>
         )}
 
-        {/* Export Buttons */}
-        <div style={{ display: "flex", gap: "16px", justifyContent: "center", flexWrap: "wrap" }}>
-          <button
-            className="primary"
-            onClick={() => handleDownload("xlsx")}
-            disabled={loading}
-            style={{ padding: "12px 28px", fontSize: "0.92rem", gap: "8px" }}
-          >
-            {loading ? (
-              <>
-                <span className="spinner">⚙️</span> Generating Excel...
-              </>
-            ) : (
-              <>
-                <ExportIcon size={16} /> Download Excel (.XLSX)
-              </>
-            )}
-          </button>
+        {/* Certified Export Buttons */}
+        <div style={{ marginBottom: "20px" }}>
+          <div style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", marginBottom: "12px" }}>
+            Certified Production Export
+          </div>
+          <div style={{ display: "flex", gap: "16px", justifyContent: "center", flexWrap: "wrap" }}>
+            <button
+              className="primary"
+              onClick={() => handleDownload("xlsx", false)}
+              disabled={loading}
+              style={{ padding: "12px 28px", fontSize: "0.92rem", gap: "8px" }}
+            >
+              {loading ? (
+                <>
+                  <span className="spinner">⚙️</span> Generating Excel...
+                </>
+              ) : (
+                <>
+                  <ExportIcon size={16} /> Download Certified Excel (.XLSX)
+                </>
+              )}
+            </button>
 
-          <button
-            className="accent"
-            onClick={() => handleDownload("csv")}
-            disabled={loading}
-            style={{ padding: "12px 28px", fontSize: "0.92rem", gap: "8px" }}
-          >
-            {loading ? (
-              <>
-                <span className="spinner">⚙️</span> Generating CSV...
-              </>
-            ) : (
-              <>
-                <ExportIcon size={16} /> Download CSV Format (.CSV)
-              </>
-            )}
-          </button>
+            <button
+              className="accent"
+              onClick={() => handleDownload("csv", false)}
+              disabled={loading}
+              style={{ padding: "12px 28px", fontSize: "0.92rem", gap: "8px" }}
+            >
+              {loading ? (
+                <>
+                  <span className="spinner">⚙️</span> Generating CSV...
+                </>
+              ) : (
+                <>
+                  <ExportIcon size={16} /> Download Certified CSV (.CSV)
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Draft / Review Export Section */}
+        <div
+          style={{
+            marginTop: "24px",
+            paddingTop: "20px",
+            borderTop: "1px solid var(--border-subtle)",
+            maxWidth: "600px",
+            margin: "24px auto 0 auto",
+          }}
+        >
+          <div style={{ fontSize: "0.80rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "8px" }}>
+            Draft / Inspection Export (Preserves MISSING & AI_INFERRED provenance states)
+          </div>
+          <div style={{ display: "flex", gap: "12px", justifyContent: "center", flexWrap: "wrap" }}>
+            <button
+              className="secondary"
+              onClick={() => handleDownload("xlsx", true)}
+              disabled={loading}
+              style={{
+                padding: "8px 18px",
+                fontSize: "0.82rem",
+                gap: "6px",
+                background: "rgba(255, 255, 255, 0.06)",
+                border: "1px solid rgba(255, 255, 255, 0.18)",
+              }}
+            >
+              <FileTextIcon size={14} /> Download Draft / Review (.XLSX)
+            </button>
+
+            <button
+              className="secondary"
+              onClick={() => handleDownload("csv", true)}
+              disabled={loading}
+              style={{
+                padding: "8px 18px",
+                fontSize: "0.82rem",
+                gap: "6px",
+                background: "rgba(255, 255, 255, 0.06)",
+                border: "1px solid rgba(255, 255, 255, 0.18)",
+              }}
+            >
+              <FileTextIcon size={14} /> Download Draft / Review (.CSV)
+            </button>
+          </div>
         </div>
       </div>
 

@@ -47,15 +47,18 @@ def classify_question_type(
 
     # 1. MCQ Detection
     if options and len(options) >= 2:
-        completeness = 1.0 if len(options) >= 4 else 0.85
-        return "MCQ", completeness, "COMPLETE"
+        is_subpart_question = any(opt.strip().lower().startswith(("how is", "write", "explain", "complete the", "calculate", "state", "describe", "define", "what happens")) for opt in options)
+        if not is_subpart_question:
+            completeness = 1.0 if len(options) >= 4 else 0.85
+            return "MCQ", completeness, "COMPLETE"
 
     # 2. Fill in the blanks
     if "fill in" in sec_lower or "blank" in sec_lower or "______" in stem_lower or "....." in stem_lower:
         return "FILL_IN_THE_BLANK", 0.95, "COMPLETE"
 
     # 3. Reaction & Chemical Equation Completion
-    if any(kw in stem_lower for kw in REACTION_KEYWORDS) or "complete the reaction" in stem_lower or "identify a and b" in stem_lower:
+    is_explain_question = stem_lower.startswith(("explain", "describe", "define", "what is", "why is", "write the iupac", "give reason", "state", "discuss"))
+    if not is_explain_question and (any(kw in stem_lower for kw in REACTION_KEYWORDS) or "complete the reaction" in stem_lower or "identify a and b" in stem_lower):
         if sub_count >= 2:
             return "LONG_ANSWER", 0.95, "COMPLETE"
         return "REACTION_COMPLETION", 0.90, "COMPLETE"

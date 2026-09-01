@@ -29,10 +29,10 @@ MOJIBAKE_MAP = {
     # Specific heats ratio / Gamma
     re.compile(r"\b(Cp/Cv\s*=\s*)b3\b", re.IGNORECASE): r"\1γ",
     re.compile(r"\b([A-Za-z0-9\(\)\s]+=\s*)b3\b"): r"\1γ",
-    re.compile(r"\b(gamma|Gamma)\b"): "γ",
-    re.compile(r"\b(lambda|Lambda)\b"): "λ",
-    re.compile(r"\b(theta|Theta)\b"): "θ",
-    re.compile(r"\b(omega|Omega)\b"): "ω",
+    re.compile(r"(?<!\bAWS\s)\b(gamma|Gamma)\b(?!\s+[A-Za-z])"): "γ",
+    re.compile(r"(?<!\bAWS\s)\b(lambda|Lambda)\b(?!\s+[A-Za-z])"): "λ",
+    re.compile(r"(?<!\bAWS\s)\b(theta|Theta)\b(?!\s+[A-Za-z])"): "θ",
+    re.compile(r"(?<!\bAWS\s)\b(omega|Omega)\b(?!\s+[A-Za-z])"): "ω",
     
     # Subscript & Superscript numbers / operators
     re.compile(r"10\^(\d+)"): lambda m: "10" + "".join("⁰¹²³⁴⁵⁶⁷⁸⁹"[int(d)] for d in m.group(1)),
@@ -79,9 +79,9 @@ def detect_unresolved_corruption(text: str) -> list[str]:
 
     defects = []
     
-    # 1. Unicode replacement character  (\ufffd)
-    if "\ufffd" in text or "" in text:
-        defects.append("Unresolvable replacement character () detected in text.")
+    # 1. Unicode replacement character (\ufffd)
+    if "\ufffd" in text:
+        defects.append("Unresolvable replacement character (\ufffd) detected in text.")
 
     # 2. Control characters (except tab/newline)
     control_chars = re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text)
@@ -89,12 +89,12 @@ def detect_unresolved_corruption(text: str) -> list[str]:
         defects.append(f"Non-printable control characters ({len(control_chars)}) detected.")
 
     # 3. Mojibake fragments like "b0", "bcF", "ac9" unmapped
-    suspicious = re.findall(r"(?:[A-Za-z0-9][A-Za-z0-9]|b0|\bbc[A-Z]\b|\bac9\b)", text)
+    suspicious = re.findall(r"(?:\ufffd[A-Za-z0-9]|(?<![A-Za-z0-9])b0(?![A-Za-z0-9])|\bbc[A-Z]\b|\bac9\b)", text)
     if suspicious:
         defects.append(f"Suspicious encoding fragment(s) {suspicious} detected.")
 
-    # 4. Truncated single-token garbage options e.g. "3BC", "B1", "R1", "R2"
-    if re.match(r"^[A-Z]\d+$|^3BC$", text.strip()):
+    # 4. Truncated single-token garbage options e.g. "3BC"
+    if re.match(r"^3BC$", text.strip()):
         defects.append(f"Malformed option token '{text.strip()}' detected.")
 
     return defects

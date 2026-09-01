@@ -3,15 +3,15 @@ from typing import Any
 
 # Headings that strongly identify an Answer Key section or page
 ANSWER_KEY_HEADING_PATTERNS = [
-    re.compile(r"^\s*(?:#+\s*)?(?:answer\s*keys?|solutions?\s*keys?|correct\s*answers?|answer\s*sheet|solutions?|correct\s*options?|key\s*answers?|answers?\s*to\s*questions?|key\s*to\s*assessment|answers?)\s*[:\-]*\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*(?:#+\s*)?(?:answers?\s*keys?|solutions?\s*keys?|correct\s*answers?|answer\s*sheet|solutions?|correct\s*options?|key\s*answers?|answers?\s*to\s*questions?|key\s*to\s*assessment|answers?\s*(?:key)?\s*(?:&|and)\s*solutions?|answers?)\s*[:\-]*\s*$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*SECTION\s*[A-Z0-9]*\s*[\:\-]\s*(?:ANSWER\s*KEY|SOLUTIONS|ANSWERS)\s*$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*(?:CHAPTER|UNIT)\s*\d+\s*[\:\-]\s*(?:ANSWER\s*KEY|ANSWERS|SOLUTIONS)\s*$", re.IGNORECASE | re.MULTILINE),
 ]
 
 # Patterns for discrete answer key entries
-# 1. "1. B", "1) B", "1 - B", "1: B", "1. (B)", "1.(B)", "[1] B", "1 B"
+# 1. "1. B", "1) B", "1 - B", "1: B", "1. (B)", "1.(B)", "[1] B", "1 B", "(4) D", "[3] B"
 DISCRETE_ENTRY_PATTERN = re.compile(
-    r"(?:^|[\n\r,;\t]|(?<=\s))(?:\(?\s*(?:Q(?:uestion)?[\s\.\:\-]*)?(\d+|[A-Za-z]\d+)\s*[\.\)\:\-\]]*)\s*[\:\-\=\s]*\(?([A-Da-d1-4]|True|False|[A-Za-z0-9\.\-\+\s]{1,40}?)\)?(?=(?:[\n\r,;\t\)]|\s+(?:\(?\d+[\.\)\:\-]|\bQ\d+)|$))",
+    r"(?:^|[\n\r,;\t]|(?<=\s))(?:[\[\(]?\s*(?:Q(?:uestion)?[\s\.\:\-]*)?(\d+|[A-Za-z]\d+)\s*[\.\)\:\-\]]*)\s*[\:\-\=\s]*\(?([A-Da-d1-4]|True|False|[A-Za-z0-9\.\-\+\s]{1,40}?)\)?(?=(?:[\n\r,;\t\)]|\s+(?:[\[\(]?\d+[\.\)\:\-]|\bQ\d+)|$))",
     re.MULTILINE
 )
 
@@ -72,6 +72,12 @@ def is_answer_key_text(text: str) -> bool:
 
     # Check for presence of question stem indicators (e.g. "?", "which of the following", "calculate", "find the")
     question_indicators = len(re.findall(r"\?|which of the following|what is the|calculate|find the|explain", clean_text, re.IGNORECASE))
+
+    # If the page contains MCQ options (A., B., C., D.) and has no explicit Answer Key heading,
+    # it is a question content page, not an answer key page.
+    opt_lines_count = len(re.findall(r"^\s*(?:\([A-Da-d1-4]\)|[A-Da-d1-4][\.\)])\s+", clean_text, re.MULTILINE))
+    if opt_lines_count >= 3 and not has_explicit_heading:
+        return False
 
     if has_explicit_heading:
         # If explicit heading and at least 1 entry or low question indicator count, it is an answer key

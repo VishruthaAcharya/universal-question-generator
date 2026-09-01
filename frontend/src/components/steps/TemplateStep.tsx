@@ -146,7 +146,7 @@ export default function TemplateStep({
             Select an enterprise saved schema from your reusable library or upload a custom Excel / CSV template defining the target assessment structure.
           </div>
         </div>
-        <span className="badge info">Step 01 / 08</span>
+        <span className="badge info">Step 01 / 06</span>
       </div>
 
       {statusMessage && (

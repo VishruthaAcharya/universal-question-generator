@@ -4,7 +4,7 @@ import pandas as pd
 
 # Regex patterns for question headers e.g. "1.", "1)", "Q1.", "Q1:", "Question 1:", "1 -", "Q.1", "[1]"
 QUESTION_HEADER_PATTERN = re.compile(
-    r"^(?:(?:Q(?:uestion)?[\s\.\:\-]*\d+)|(?:\d+)[\.\)\:\-]|\bQ\d+\b|\[\d+\])\s+",
+    r"^\s*(?:(?:Q(?:uestion)?[\s\.\:\-]*\d+[\.\)\:\-]?)|(?:\d+)[\.\)\:\-]|\bQ\d+\b|\[\d+\])\s+",
     re.IGNORECASE | re.MULTILINE
 )
 

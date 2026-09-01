@@ -14,6 +14,7 @@ STORAGE_DIR = Path("storage/templates")
 async def export_questions(payload: dict = Body(...), db: Session = Depends(get_db)):
     question_set_id = payload.get("question_set_id")
     fmt = payload.get("format", "xlsx").lower()
+    is_draft = bool(payload.get("is_draft", False))
     
     if not question_set_id:
         raise HTTPException(status_code=400, detail="question_set_id is required.")
@@ -27,19 +28,29 @@ async def export_questions(payload: dict = Body(...), db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="Template associated with the question set not found.")
         
     columns = tpl.schema_json.get("columns", [])
-    questions_list = [q.data_json for q in sorted(qs.questions, key=lambda x: x.row_number or 0)]
+    sorted_questions = sorted(qs.questions, key=lambda x: x.row_number or 0)
+    questions_list = [q.data_json for q in sorted_questions]
+    metadata_list = [q.source_metadata_json for q in sorted_questions]
     
     # Locate original template file
     orig_suffix = Path(tpl.original_filename or "").suffix
     template_path = STORAGE_DIR / f"{tpl.id}{orig_suffix}"
     
+    prefix = "draft_review_" if is_draft else "exported_"
     if fmt == "csv":
-        buf = export_to_csv(questions_list, columns)
-        filename = f"exported_{tpl.name}.csv"
+        buf = export_to_csv(questions_list, columns, is_draft=is_draft, metadata_list=metadata_list)
+        filename = f"{prefix}{tpl.name}.csv"
         media_type = "text/csv; charset=utf-8"
     elif fmt == "xlsx":
-        buf = export_to_xlsx(questions_list, columns, template_path=str(template_path), sheet_name=tpl.sheet_name)
-        filename = f"exported_{tpl.name}.xlsx"
+        buf = export_to_xlsx(
+            questions_list,
+            columns,
+            template_path=str(template_path),
+            sheet_name=tpl.sheet_name,
+            is_draft=is_draft,
+            metadata_list=metadata_list
+        )
+        filename = f"{prefix}{tpl.name}.xlsx"
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     else:
         raise HTTPException(status_code=400, detail="Format must be csv or xlsx.")

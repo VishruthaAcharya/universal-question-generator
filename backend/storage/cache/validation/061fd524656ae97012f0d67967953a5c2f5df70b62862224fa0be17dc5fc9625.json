@@ -1,0 +1,34 @@
+{
+  "version": "v3_validation",
+  "hash": "061fd524656ae97012f0d67967953a5c2f5df70b62862224fa0be17dc5fc9625",
+  "result": {
+    "question_id": "q_vis",
+    "row_number": 4,
+    "ai_answer": null,
+    "ai_answer_text": null,
+    "source_answer": "B",
+    "source_answer_text": "20 m/s^2",
+    "answer_match": true,
+    "confidence": 0.3,
+    "confidence_level": "UNCERTAIN",
+    "validation_status": "VISUAL_CONTEXT_REQUIRED",
+    "validation_methods": [
+      "INDEPENDENT_AI_SOLVER"
+    ],
+    "review_required": true,
+    "review_priority": 4,
+    "reason": "Visual context, diagram, or chart required to solve reliably.",
+    "subject": "Physics",
+    "signals": {
+      "solver_agreed": false,
+      "critic_agreed": false,
+      "deterministic_verified": false,
+      "extraction_confidence": 0.95,
+      "option_count": 4,
+      "defects_detected": [
+        "VISUAL_DEPENDENCY_DETECTED"
+      ],
+      "vote_agreement_ratio": null
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "version": "v3_validation",
+  "hash": "ecbe9f9ca4e3e46c303799d21d8a1b87e4869f25d2d2b525c1bd5cd229424253",
+  "result": {
+    "question_id": "q_calib_1",
+    "row_number": 5,
+    "ai_answer": "A",
+    "ai_answer_text": "Rome",
+    "source_answer": "A",
+    "source_answer_text": "Rome",
+    "answer_match": true,
+    "confidence": 0.9,
+    "confidence_level": "MEDIUM",
+    "validation_status": "AI_VALIDATED",
+    "validation_methods": [
+      "INDEPENDENT_AI_SOLVER",
+      "AI_BLIND_CRITIC_AGREED"
+    ],
+    "review_required": false,
+    "review_priority": 5,
+    "reason": "Rome is the official capital city of Italy, while Milan, Naples, and Turin are major Italian cities but not the capital.",
+    "subject": "General",
+    "signals": {
+      "solver_agreed": true,
+      "critic_agreed": true,
+      "deterministic_verified": false,
+      "extraction_confidence": 0.95,
+      "option_count": 4,
+      "defects_detected": [],
+      "vote_agreement_ratio": null
+    }
+  }
+}

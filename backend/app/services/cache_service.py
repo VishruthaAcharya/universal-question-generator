@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-CACHE_VERSION = "v2"
+CACHE_VERSION = "v6"
 CACHE_DIR = Path("storage/cache/extractions")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 

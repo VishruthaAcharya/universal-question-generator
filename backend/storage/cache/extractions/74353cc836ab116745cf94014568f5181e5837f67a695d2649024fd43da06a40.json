@@ -1,0 +1,98 @@
+{
+  "version": "v5",
+  "file_hash": "74353cc836ab116745cf94014568f5181e5837f67a695d2649024fd43da06a40",
+  "questions": [
+    {
+      "question": "What is H2O?",
+      "options": [
+        "Water",
+        "Hydrogen",
+        "Oxygen",
+        "Helium"
+      ],
+      "correct_answer": "Water",
+      "topic": "Chemistry",
+      "subtopic": "",
+      "difficulty": "Easy",
+      "score": "1",
+      "starter_code": "",
+      "expected_output": "",
+      "test_cases": "",
+      "source_page": 1,
+      "Question": "What is H2O?",
+      "Option 1": "Water",
+      "Option 2": "Hydrogen",
+      "Option 3": "Oxygen",
+      "Option 4": "Helium",
+      "Correct Answer": "Water",
+      "Topic": "Chemistry",
+      "Difficulty": "Easy",
+      "extraction_method": "native_text",
+      "text_quality_score": 1.0,
+      "character_count": 12,
+      "source_answer": "Water",
+      "answer_source": "QUESTION_TEXT",
+      "answer_page": 1,
+      "mapping_confidence": 0.95,
+      "answer_mapping_status": "ANSWER_MAPPED",
+      "mapping_reason": "Answer extracted inline from question block.",
+      "option_a": "Water",
+      "option_b": "Hydrogen",
+      "option_c": "Oxygen",
+      "option_d": "Helium",
+      "question_confidence": 0.98,
+      "option_confidence": 1.0,
+      "answer_confidence": 0.95,
+      "overall_confidence": 0.98,
+      "status": "COMPLETE",
+      "extraction_defects": [],
+      "review_reason": "All integrity and Unicode checks passed.",
+      "extraction_stats": {
+        "pages_processed": 1,
+        "total_questions_detected": 1,
+        "mcqs_detected": 0,
+        "fill_in_the_blanks": 0,
+        "short_answer": 0,
+        "long_answer": 0,
+        "diagram_reaction_questions": 0,
+        "questions_requiring_vision": 0,
+        "questions_requiring_review": 0,
+        "native_text_pages_count": 1,
+        "ocr_pages_count": 0,
+        "pages_breakdown": [
+          {
+            "page_number": 1,
+            "extraction_method": "native_text",
+            "text_quality_score": 1.0,
+            "character_count": 142
+          }
+        ],
+        "average_extraction_confidence": 0.95,
+        "extraction_time_ms": 41.0
+      }
+    }
+  ],
+  "metadata": {
+    "pages_processed": 1,
+    "total_questions_detected": 1,
+    "mcqs_detected": 0,
+    "fill_in_the_blanks": 0,
+    "short_answer": 0,
+    "long_answer": 0,
+    "diagram_reaction_questions": 0,
+    "questions_requiring_vision": 0,
+    "questions_requiring_review": 0,
+    "native_text_pages_count": 1,
+    "ocr_pages_count": 0,
+    "pages_breakdown": [
+      {
+        "page_number": 1,
+        "extraction_method": "native_text",
+        "text_quality_score": 1.0,
+        "character_count": 142
+      }
+    ],
+    "average_extraction_confidence": 0.95,
+    "extraction_time_ms": 41.0
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "version": "v5",
+  "file_hash": "7629530678d9193ac18a8bc1f389cd9b3dd2e12328a4cdda59fea6c3c99f8f9e",
+  "questions": [
+    {
+      "question_id": "MCQ-001",
+      "question_number": 1,
+      "sequence_id": "MCQ-001",
+      "section": "General",
+      "topic": "General",
+      "category": "General",
+      "domain": "",
+      "difficulty": "Medium",
+      "question_type": "MCQ",
+      "question": "What is the value of pi?",
+      "options": [
+        "3.14",
+        "2.71",
+        "1.41",
+        "1.73"
+      ],
+      "option_a": "3.14",
+      "option_b": "2.71",
+      "option_c": "1.41",
+      "option_d": "1.73",
+      "correct_answer": "A",
+      "source_answer": "A",
+      "subparts": [],
+      "marks": "1",
+      "score": "1",
+      "source_page": 1,
+      "extraction_method": "native_text",
+      "text_quality_score": 1.0,
+      "character_count": 110,
+      "extraction_completeness": 1.0,
+      "status": "COMPLETE",
+      "question_confidence": 0.98,
+      "option_confidence": 1.0,
+      "answer_confidence": 0.95,
+      "overall_confidence": 0.98,
+      "extraction_defects": [],
+      "review_reason": "All integrity and Unicode checks passed.",
+      "answer_source": "QUESTION_TEXT",
+      "answer_page": 1,
+      "mapping_confidence": 0.95,
+      "answer_mapping_status": "ANSWER_MAPPED",
+      "mapping_reason": "Answer extracted inline from question block.",
+      "extraction_stats": {
+        "pages_processed": 1,
+        "total_questions_detected": 1,
+        "mcqs_detected": 1,
+        "fill_in_the_blanks": 0,
+        "short_answer": 0,
+        "long_answer": 0,
+        "diagram_reaction_questions": 0,
+        "questions_requiring_vision": 0,
+        "questions_requiring_review": 0,
+        "native_text_pages_count": 1,
+        "ocr_pages_count": 0,
+        "pages_breakdown": [
+          {
+            "page_number": 1,
+            "extraction_method": "native_text",
+            "text_quality_score": 1.0,
+            "character_count": 112
+          }
+        ],
+        "average_extraction_confidence": 1.0,
+        "extraction_time_ms": 6.7
+      }
+    }
+  ],
+  "metadata": {
+    "pages_processed": 1,
+    "total_questions_detected": 1,
+    "mcqs_detected": 1,
+    "fill_in_the_blanks": 0,
+    "short_answer": 0,
+    "long_answer": 0,
+    "diagram_reaction_questions": 0,
+    "questions_requiring_vision": 0,
+    "questions_requiring_review": 0,
+    "native_text_pages_count": 1,
+    "ocr_pages_count": 0,
+    "pages_breakdown": [
+      {
+        "page_number": 1,
+        "extraction_method": "native_text",
+        "text_quality_score": 1.0,
+        "character_count": 112
+      }
+    ],
+    "average_extraction_confidence": 1.0,
+    "extraction_time_ms": 6.7
+  }
+}

@@ -86,13 +86,13 @@ export default function QuestionSelectionStep({
       <div className="card-header-flex">
         <div>
           <div className="card-title">
-            <SelectionIcon size={22} color="var(--primary-hover)" /> Step 3: Question Ingestion & Selection Control
+            <SelectionIcon size={22} color="var(--primary-hover)" /> Step 3: Questions
           </div>
           <div className="card-subtitle">
-            The parser extracted <strong>{totalDetected} questions</strong> from the source file. Select which questions will proceed through mapping, validation, review, and final export.
+            The parser extracted <strong>{totalDetected} questions</strong> from the source files. Select which questions to proceed to review and export.
           </div>
         </div>
-        <span className="badge info">Step 03 / 08</span>
+        <span className="badge info">Step 03 / 06</span>
       </div>
 
       {/* Control Bar */}

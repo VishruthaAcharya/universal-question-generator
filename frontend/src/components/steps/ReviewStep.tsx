@@ -7,7 +7,7 @@ import type {
   NormalizedQuestionSuggestion,
   NormalizedFieldSuggestion,
 } from "../../types";
-import { aiFillMissingFields, aiFillQuestionFields } from "../../lib/api";
+import { aiFillMissingFields, aiFillQuestionFields, updateQuestion } from "../../lib/api";
 import ReviewTable from "../ReviewTable";
 import AlertPanel from "../AlertPanel";
 import {
@@ -184,6 +184,7 @@ export default function ReviewStep({
   onNext,
 }: ReviewStepProps) {
   const [viewMode, setViewMode] = useState<"studio" | "grid">("studio");
+  const [showDetails, setShowDetails] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
 
   // Local mutable copy of questions — initializes from prop, updated by AI fill
@@ -202,10 +203,17 @@ export default function ReviewStep({
   const [filterValidation, setFilterValidation] = useState<"all" | "valid" | "invalid">("all");
   const [filterOrigin, setFilterOrigin] = useState<"all" | "extracted" | "inferred" | "user_edited">("all");
 
-  // AI Fill States
+  // AI Fill & Bulk Processing States
   const [isAiFilling, setIsAiFilling] = useState(false);
   const [isBatchFilling, setIsBatchFilling] = useState(false);
+  const [isProcessingBulk, setIsProcessingBulk] = useState(false);
+  const [bulkProgressMessage, setBulkProgressMessage] = useState<string>("");
   const [batchFillProgress, setBatchFillProgress] = useState<string>("");
+  const [bulkConfirmationModal, setBulkConfirmationModal] = useState<{
+    type: "keep_source" | "apply_ai" | "fill_missing";
+    count: number;
+    missingFieldsCount?: number;
+  } | null>(null);
   const [aiSuggestions, setAiSuggestions] = useState<NormalizedQuestionSuggestion[] | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [aiFillError, setAiFillError] = useState<string>("");
@@ -289,6 +297,50 @@ export default function ReviewStep({
     sourceAnswerVal.toUpperCase() === aiAnswerVal.toUpperCase()
   );
 
+  // Helper to extract option text from key (A/B/C/D)
+  const getOptionText = (key: string) => {
+    if (!key || !currentQuestion) return "";
+    const k = key.trim().toUpperCase();
+    if (k === "A") return currentQuestion.data_json?.[optAKey] || "";
+    if (k === "B") return currentQuestion.data_json?.[optBKey] || "";
+    if (k === "C") return currentQuestion.data_json?.[optCKey] || "";
+    if (k === "D") return currentQuestion.data_json?.[optDKey] || "";
+    return "";
+  };
+
+  const sourceKey = (currentQuestion?.source_answer_key || sourceAnswerVal || "").trim().toUpperCase();
+  const sourceText = currentQuestion?.source_answer_text || getOptionText(sourceKey);
+
+  const aiKey = (currentQuestion?.ai_answer_key || aiAnswerVal || "").trim().toUpperCase();
+  const aiText = currentQuestion?.ai_answer_text || getOptionText(aiKey);
+
+  const finalKey = (currentQuestion?.final_answer_key || finalAnswerVal || "").trim().toUpperCase();
+  const finalText = currentQuestion?.final_answer_text || getOptionText(finalKey);
+
+  const duplicateOptionsMessage = useMemo(() => {
+    if (!currentQuestion) return null;
+    const optValues = [
+      { key: "A", val: (currentQuestion.data_json?.[optAKey] || "").trim() },
+      { key: "B", val: (currentQuestion.data_json?.[optBKey] || "").trim() },
+      { key: "C", val: (currentQuestion.data_json?.[optCKey] || "").trim() },
+      { key: "D", val: (currentQuestion.data_json?.[optDKey] || "").trim() },
+    ].filter(o => o.val !== "");
+
+    const seen = new Map<string, string>();
+    for (const opt of optValues) {
+      if (seen.has(opt.val)) {
+        return `Options ${seen.get(opt.val)} and ${opt.key} contain the same value.`;
+      }
+      seen.set(opt.val, opt.key);
+    }
+    return null;
+  }, [currentQuestion, optAKey, optBKey, optCKey, optDKey]);
+
+  const validationStatus = currentQuestion?.validation?.ai_validation?.validation_status || currentQuestion?.status || "";
+  const isConflict = isAnswerConflict;
+  const isMissing = isMissingSource || validationStatus === "MISSING_ANSWER" || !sourceKey;
+  const isAmbiguity = validationStatus === "AMBIGUOUS" || !!duplicateOptionsMessage;
+
   // Available options for Final Answer select dropdown
   const availableOptionChoices = useMemo(() => {
     if (!currentQuestion) return [];
@@ -335,10 +387,143 @@ export default function ReviewStep({
     return choices;
   }, [currentQuestion, optAKey, optBKey, optCKey, optDKey, sourceAnswerVal, aiAnswerVal, finalAnswerVal]);
 
+  // Helper to extract Source Key from any QuestionRow
+  const getQuestionSourceKey = (q: QuestionRow | undefined) => {
+    if (!q) return "";
+    const srcVal = (
+      q.source_answer ||
+      q.source_metadata?.answer_source ||
+      ""
+    ).trim();
+    return (q.source_answer_key || srcVal || "").trim().toUpperCase();
+  };
+
+  // Helper to extract AI Key from any QuestionRow
+  const getQuestionAiKey = (q: QuestionRow | undefined) => {
+    if (!q) return "";
+    const aiVal = (
+      q.ai_answer ||
+      q.validation?.ai_validation?.ai_answer ||
+      ""
+    ).trim();
+    return (q.ai_answer_key || aiVal || "").trim().toUpperCase();
+  };
+
+  // Total missing metadata fields across the entire assessment
+  const totalMissingFieldsCount = useMemo(() => {
+    const coreFields = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
+    const answerKeywords = ["answer", "correct", "solution", "key"];
+    let total = 0;
+    localQuestions.forEach((q) => {
+      columns.forEach((col) => {
+        if (coreFields.has(col)) return;
+        if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return;
+        if (!String(q.data_json?.[col] || "").trim()) {
+          total += 1;
+        }
+      });
+    });
+    return total;
+  }, [localQuestions, columns, questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
+
+  // Applicable questions for bulk operations
+  const applicableSourceQuestions = useMemo(() => {
+    return localQuestions.filter((q) => {
+      const srcKey = getQuestionSourceKey(q);
+      return Boolean(srcKey);
+    });
+  }, [localQuestions]);
+
+  const applicableAiQuestions = useMemo(() => {
+    return localQuestions.filter((q) => {
+      const aiKey = getQuestionAiKey(q);
+      return Boolean(aiKey);
+    });
+  }, [localQuestions]);
+
+  const handleSetQuestionFinalAnswer = (q: QuestionRow, newAnswer: string) => {
+    if (!q || !newAnswer) return;
+    q.final_answer = newAnswer;
+    onCellChange(q.id, answerKey, newAnswer);
+  };
+
   const handleSetFinalAnswer = (newAnswer: string) => {
     if (!currentQuestion) return;
-    currentQuestion.final_answer = newAnswer;
-    onCellChange(currentQuestion.id, answerKey, newAnswer);
+    handleSetQuestionFinalAnswer(currentQuestion, newAnswer);
+  };
+
+  // Robust, sequential, persistent bulk answer update handler
+  const executeBulkAnswerAction = async (type: "source" | "ai") => {
+    if (isProcessingBulk || isBatchFilling || isAiFilling) return;
+    setIsProcessingBulk(true);
+    setBulkConfirmationModal(null);
+    setAiFillError("");
+    setAiSuccessNotice("");
+
+    const targetQuestions = type === "source" ? applicableSourceQuestions : applicableAiQuestions;
+    const total = targetQuestions.length;
+    let updatedCount = 0;
+    let failedCount = 0;
+    const failedReasons: string[] = [];
+
+    const updatedList = [...localQuestions];
+
+    for (let i = 0; i < total; i++) {
+      const q = targetQuestions[i];
+      const targetAns = type === "source" ? getQuestionSourceKey(q) : getQuestionAiKey(q);
+
+      setBulkProgressMessage(
+        `Processing question ${i + 1} of ${total}: ${type === "source" ? "Preserving source answer" : "Applying AI suggestion"} (${targetAns})...`
+      );
+
+      if (!targetAns) {
+        failedCount += 1;
+        continue;
+      }
+
+      try {
+        const persistedQ = await updateQuestion(q.id, { [answerKey]: targetAns });
+        const idxInList = updatedList.findIndex((item) => item.id === q.id);
+        if (idxInList !== -1) {
+          updatedList[idxInList] = persistedQ;
+        }
+        updatedCount += 1;
+      } catch (err: any) {
+        failedCount += 1;
+        if (failedReasons.length < 3) {
+          failedReasons.push(err?.message || "Save failed");
+        }
+      }
+    }
+
+    setLocalQuestions(updatedList);
+    onQuestionsUpdate?.(updatedList);
+    setIsProcessingBulk(false);
+    setBulkProgressMessage("");
+
+    if (failedCount === 0) {
+      if (type === "source") {
+        setAiSuccessNotice(`✓ Source answers preserved: ${updatedCount} of ${total} questions now use their original source answers.`);
+      } else {
+        setAiSuccessNotice(`✓ AI suggestions applied: ${updatedCount} of ${total} questions updated.`);
+      }
+    } else {
+      const failDetail = failedReasons.length > 0 ? ` (${failedReasons.join("; ")})` : "";
+      setAiSuccessNotice(
+        `Completed: ${updatedCount} of ${total} questions updated. ${failedCount} question${failedCount === 1 ? "" : "s"} could not be saved${failDetail}.`
+      );
+    }
+  };
+
+  const handleApproveAndNext = () => {
+    if (!currentQuestion) return;
+    const ans = finalAnswerVal || sourceAnswerVal || aiAnswerVal || "A";
+    handleSetFinalAnswer(ans);
+    if (currentIndex < localQuestions.length - 1) {
+      setCurrentIndex((prev) => prev + 1);
+    } else {
+      onNext();
+    }
   };
 
   // Identify missing metadata fields for current question
@@ -461,19 +646,25 @@ export default function ReviewStep({
 
   // ──────────────────────────────────────────────────────────────────────────────
   // BATCH AI Fill — resolves missing fields for all questions sequentially
-  // Calls the per-question endpoint for each question in turn.
+  // Processes ALL selected questions without silently skipping, reporting exact counts.
   // ──────────────────────────────────────────────────────────────────────────────
   const handleTriggerBatchAIFill = async () => {
     if (localQuestions.length === 0) return;
-    if (isAiFilling || isBatchFilling) return;
+    if (isAiFilling || isBatchFilling || isProcessingBulk) return;
 
     setIsBatchFilling(true);
+    setIsProcessingBulk(true);
     setAiFillError("");
     setAiSuccessNotice("");
     setBatchFillProgress("");
 
-    let totalResolved = 0;
-    let totalUnresolved = 0;
+    let processedCount = 0;
+    let updatedCount = 0;
+    let alreadyCompleteCount = 0;
+    let needsReviewCount = 0;
+    let unableToInferCount = 0;
+    let failedCount = 0;
+
     const context = {
       subject: batchConfig.subject || "General",
       gradeClass: batchConfig.gradeClass || "General",
@@ -496,23 +687,32 @@ export default function ReviewStep({
         return !String(q.data_json?.[col] || "").trim();
       }).length;
 
-      if (missingCount === 0) continue; // Skip questions with no missing fields
+      processedCount += 1;
+
+      if (missingCount === 0) {
+        alreadyCompleteCount += 1;
+        continue;
+      }
 
       try {
         const updatedQ = await aiFillQuestionFields(q.id, context);
         updatedQuestions[i] = updatedQ;
 
-        // Count resolved fields
-        const stillMissing = columns.filter((col) => {
-          if (coreFieldSet.has(col)) return false;
-          if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return false;
-          return !String(updatedQ.data_json?.[col] || "").trim();
-        }).length;
-        totalResolved += missingCount - stillMissing;
-        totalUnresolved += stillMissing;
+        const resStatus = updatedQ.ai_fill_result?.status;
+        if (resStatus === "updated") {
+          updatedCount += 1;
+          if ((updatedQ.ai_fill_result?.review_required_count || 0) > 0) {
+            needsReviewCount += 1;
+          }
+        } else if (resStatus === "needs_review") {
+          needsReviewCount += 1;
+        } else if (resStatus === "already_complete") {
+          alreadyCompleteCount += 1;
+        } else {
+          unableToInferCount += 1;
+        }
       } catch {
-        // Non-fatal: log and continue to next question
-        totalUnresolved += missingCount;
+        failedCount += 1;
       }
     }
 
@@ -554,21 +754,21 @@ export default function ReviewStep({
     onQuestionsUpdate?.(updatedQuestions);
     setBatchFillProgress("");
     setIsBatchFilling(false);
+    setIsProcessingBulk(false);
 
-    if (totalResolved > 0 && totalUnresolved === 0) {
-      setAiSuccessNotice(`✓ Batch complete: ${totalResolved} field${totalResolved === 1 ? "" : "s"} filled across all questions.`);
-    } else if (totalResolved > 0) {
-      setAiSuccessNotice(`✓ Batch complete: ${totalResolved} field${totalResolved === 1 ? "" : "s"} filled. ⚠ ${totalUnresolved} could not be safely inferred.`);
-    } else {
-      setAiSuccessNotice("No fields could be safely inferred for any question. Review manually.");
-    }
+    setAiSuccessNotice(
+      `Processed ${processedCount} / ${localQuestions.length} • Updated ${updatedCount} • Already complete ${alreadyCompleteCount} • Needs review ${needsReviewCount} • Unable to infer ${unableToInferCount} • Failed ${failedCount}`
+    );
   };
 
-  // Guard for batch fill: use localQuestions.length check
-  // (replaces the earlier `questions.length === 0` guard that used prop array)
+  // Guard for batch fill: open confirmation modal before processing
   const handleTriggerBatchAIFillGuarded = () => {
-    if (localQuestions.length === 0) return;
-    handleTriggerBatchAIFill();
+    if (localQuestions.length === 0 || isProcessingBulk || isBatchFilling || isAiFilling) return;
+    setBulkConfirmationModal({
+      type: "fill_missing",
+      count: localQuestions.length,
+      missingFieldsCount: totalMissingFieldsCount,
+    });
   };
 
   // Accept single field suggestion
@@ -714,10 +914,10 @@ export default function ReviewStep({
       <div className="card-header-flex">
         <div>
           <div className="card-title">
-            <ReviewIcon size={22} color="var(--primary-hover)" /> Step 6: Human Review & AI-Assisted Workspace
+            <ReviewIcon size={22} color="var(--primary-hover)" /> Step 4: Human Review
           </div>
           <div className="card-subtitle">
-            Authoritative human review workspace. Inspect source page origins, verify answer parity, and leverage AI to infill missing metadata.
+            Authoritative human review workspace. Verify answer parity and leverage AI to infill missing metadata.
           </div>
         </div>
 
@@ -766,9 +966,147 @@ export default function ReviewStep({
         </AlertPanel>
       )}
 
+      {/* Active Bulk Processing Status Banner */}
+      {(isProcessingBulk || isBatchFilling) && (
+        <div
+          style={{
+            background: "rgba(37, 99, 235, 0.15)",
+            border: "1px solid rgba(59, 130, 246, 0.4)",
+            borderRadius: "10px",
+            padding: "14px 18px",
+            marginBottom: "16px",
+            display: "flex",
+            alignItems: "center",
+            gap: "14px",
+          }}
+        >
+          <div
+            style={{
+              width: "20px",
+              height: "20px",
+              border: "3px solid rgba(59, 130, 246, 0.3)",
+              borderTopColor: "#3B82F6",
+              borderRadius: "50%",
+              animation: "spin 1s linear infinite",
+            }}
+          />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: "0.88rem", color: "#FFFFFF", marginBottom: "3px" }}>
+              {isBatchFilling ? "AI INFERENCE IN PROGRESS" : "BULK PERSISTENCE IN PROGRESS"}
+            </div>
+            <div style={{ fontSize: "0.80rem", color: "#93C5FD" }}>
+              {bulkProgressMessage || batchFillProgress || "Processing questions sequentially and persisting to database..."}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* STUDIO MODE (Source vs Extracted vs AI Assist vs Final) */}
       {viewMode === "studio" && currentQuestion && (
         <div>
+          {/* Compact Question Navigator */}
+          <div
+            style={{
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: "10px",
+              padding: "12px 16px",
+              marginBottom: "16px",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", flexWrap: "wrap", gap: "8px" }}>
+              <div style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>Questions Navigator</span>
+                <span style={{ fontSize: "0.74rem", fontWeight: 500, color: "var(--text-muted)" }}>
+                  ({localQuestions.length} total • Question {currentIndex + 1} selected)
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: "12px", fontSize: "0.72rem", color: "var(--text-muted)", flexWrap: "wrap" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                  <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--accent)" }} /> Valid
+                </span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                  <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--danger)" }} /> Conflict / Issue
+                </span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                  <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--warning)" }} /> Missing Fields
+                </span>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(64px, 1fr))",
+                gap: "6px",
+                maxHeight: "130px",
+                overflowY: "auto",
+                padding: "2px",
+              }}
+            >
+              {localQuestions.map((q, idx) => {
+                const isSelected = idx === currentIndex;
+                const isValid = q.validation?.valid;
+                const hasConflict = Boolean(
+                  q.source_answer && q.ai_answer && q.source_answer.toUpperCase() !== q.ai_answer.toUpperCase()
+                );
+                const isMissingAnswer = !q.source_answer && !q.final_answer;
+                const hasMissingFields = columns.some((col) => {
+                  const isCore = [questionKey, optAKey, optBKey, optCKey, optDKey, answerKey].includes(col);
+                  return !isCore && !/answer|correct/i.test(col) && !String(q.data_json?.[col] || "").trim();
+                });
+
+                let statusColor = "var(--accent)";
+                let statusSymbol = "✓";
+                if (hasConflict || !isValid) {
+                  statusColor = "var(--danger)";
+                  statusSymbol = "!";
+                } else if (isMissingAnswer) {
+                  statusColor = "var(--warning)";
+                  statusSymbol = "?";
+                } else if (hasMissingFields) {
+                  statusColor = "var(--warning)";
+                  statusSymbol = "•";
+                }
+
+                return (
+                  <button
+                    key={q.id || idx}
+                    type="button"
+                    onClick={() => setCurrentIndex(idx)}
+                    style={{
+                      padding: "6px 4px",
+                      fontSize: "0.78rem",
+                      fontWeight: isSelected ? 800 : 600,
+                      borderRadius: "6px",
+                      border: isSelected
+                        ? "2px solid var(--primary-hover)"
+                        : "1px solid var(--border-subtle)",
+                      background: isSelected
+                        ? "rgba(124, 58, 237, 0.2)"
+                        : "rgba(0, 0, 0, 0.2)",
+                      color: isSelected ? "#FFFFFF" : "var(--text-primary)",
+                      cursor: "pointer",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "2px",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
+                      <span>{String(idx + 1).padStart(2, "0")}</span>
+                      <span style={{ fontSize: "0.68rem", color: statusColor, fontWeight: 800 }}>
+                        {statusSymbol}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Stepper Bar & Batch AI Fill Trigger */}
           <div
             style={{
@@ -802,7 +1140,7 @@ export default function ReviewStep({
               <button
                 className="accent"
                 onClick={handleTriggerBatchAIFillGuarded}
-                disabled={isAiFilling || isBatchFilling}
+                disabled={isAiFilling || isBatchFilling || isProcessingBulk}
                 style={{ padding: "6px 14px", fontSize: "0.82rem", gap: "6px" }}
               >
                 <SparklesIcon size={15} />
@@ -814,6 +1152,13 @@ export default function ReviewStep({
               </button>
 
               <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  className="secondary"
+                  onClick={() => setShowDetails(!showDetails)}
+                  style={{ padding: "6px 12px", fontSize: "0.8rem", gap: "4px" }}
+                >
+                  {showDetails ? "Hide AI Details" : "View AI Details"}
+                </button>
                 <button
                   className="secondary"
                   disabled={currentIndex === 0}
@@ -835,9 +1180,17 @@ export default function ReviewStep({
           </div>
 
           {/* Split Container */}
-          <div className="review-studio-container">
+          <div
+            className="review-studio-container"
+            style={{
+              gridTemplateColumns: showDetails ? "340px 1fr" : "1fr",
+              maxWidth: showDetails ? "100%" : "800px",
+              margin: "0 auto",
+            }}
+          >
             {/* Left Column: SOURCE CONTEXT & AI INFILL HUB */}
-            <div className="studio-source-panel">
+            {showDetails && (
+              <div className="studio-source-panel">
               {/* Cross-Page Traceability & Source Context */}
               <div style={{ background: "rgba(0,0,0,0.2)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-subtle)", display: "flex", flexDirection: "column", gap: "6px" }}>
                 <div style={{ fontSize: "0.76rem", color: "var(--text-secondary)" }}>
@@ -982,7 +1335,7 @@ export default function ReviewStep({
                           {col}
                         </span>
                         <span style={{ color: origin === "inferred" ? "var(--warning)" : origin === "user_edited" ? "var(--primary-hover)" : "var(--accent)" }}>
-                          {origin === "inferred" ? `AI (${(confidence * 100).toFixed(0)}%)` : origin === "user_edited" ? "Edited" : "Source"}
+                          {origin === "inferred" ? `AI_INFERRED · ${(confidence * 100).toFixed(0)}%` : origin === "user_edited" ? "Edited" : "Source"}
                         </span>
                       </div>
                     );
@@ -990,6 +1343,7 @@ export default function ReviewStep({
                 </div>
               </div>
             </div>
+            )}
 
             {/* Right Column: QUESTION EDITOR FORM */}
             <div className="studio-editor-panel">
@@ -1022,237 +1376,280 @@ export default function ReviewStep({
               <div
                 style={{
                   background: "var(--bg-surface)",
-                  border: isAnswerConflict ? "1px solid rgba(239, 68, 68, 0.4)" : "1px solid var(--border-medium)",
+                  border: isConflict ? "1px solid rgba(239, 68, 68, 0.4)" : "1px solid var(--border-medium)",
                   borderRadius: "12px",
                   padding: "16px",
                   marginTop: "6px",
                   marginBottom: "6px",
                 }}
               >
-                {/* Status Header */}
+                {/* Bulk Answer Decision Cards */}
                 <div
                   style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: "14px",
-                    paddingBottom: "10px",
-                    borderBottom: "1px solid var(--border-subtle)",
-                    flexWrap: "wrap",
-                    gap: "8px",
+                    background: "rgba(15, 23, 42, 0.7)",
+                    border: "1px solid rgba(255, 255, 255, 0.12)",
+                    borderRadius: "12px",
+                    padding: "16px",
+                    marginBottom: "16px",
                   }}
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span style={{ fontSize: "0.82rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
-                      Answer Validation
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <SparklesIcon size={18} color="#93C5FD" />
+                      <span style={{ fontSize: "0.88rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                        Bulk Answer Decisions ({localQuestions.length} Total Questions)
+                      </span>
+                    </div>
+                    <span style={{ fontSize: "0.74rem", color: "var(--text-muted)" }}>
+                      Affects all applicable questions across the current assessment
                     </span>
-
-                    {isAnswerConflict ? (
-                      <span className="badge danger" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                        <AlertTriangleIcon size={12} /> Answer conflict detected
-                      </span>
-                    ) : isMissingSource ? (
-                      <span className="badge warning" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                        <SparklesIcon size={12} /> Source answer missing · AI suggested
-                      </span>
-                    ) : (
-                      <span className="badge success" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                        <CheckCircleIcon size={12} /> Answer matches source
-                      </span>
-                    )}
                   </div>
 
-                  <span style={{ fontSize: "0.76rem", color: "var(--text-muted)" }}>
-                    AI Confidence: <strong style={{ color: "var(--primary-hover)" }}>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
-                  </span>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "12px" }}>
+                    {/* Card 1: Keep Source Answers for All */}
+                    <div
+                      style={{
+                        background: "rgba(255, 255, 255, 0.04)",
+                        border: "1px solid rgba(255, 255, 255, 0.1)",
+                        borderRadius: "8px",
+                        padding: "14px",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "space-between",
+                        gap: "10px",
+                      }}
+                    >
+                      <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                          <strong style={{ fontSize: "0.85rem", color: "#F8FAFC" }}>Keep Source Answers for All</strong>
+                          <span className="badge info" style={{ fontSize: "0.7rem", padding: "2px 6px" }}>
+                            {applicableSourceQuestions.length} applicable
+                          </span>
+                        </div>
+                        <p style={{ margin: 0, fontSize: "0.76rem", color: "var(--text-secondary)", lineHeight: "1.35" }}>
+                          Use the extracted source answer for every question. AI suggestions will not replace source answers.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={applicableSourceQuestions.length === 0 || isProcessingBulk || isBatchFilling}
+                        onClick={() => setBulkConfirmationModal({ type: "keep_source", count: applicableSourceQuestions.length })}
+                        style={{
+                          padding: "8px 14px",
+                          fontSize: "0.80rem",
+                          fontWeight: 600,
+                          background: "rgba(255, 255, 255, 0.08)",
+                          border: "1px solid rgba(255, 255, 255, 0.25)",
+                          color: "#F8FAFC",
+                          borderRadius: "6px",
+                          cursor: (applicableSourceQuestions.length === 0 || isProcessingBulk || isBatchFilling) ? "not-allowed" : "pointer",
+                          opacity: (applicableSourceQuestions.length === 0 || isProcessingBulk || isBatchFilling) ? 0.45 : 1,
+                          width: "100%",
+                          justifyContent: "center",
+                        }}
+                      >
+                        Keep Source Answers for All
+                      </button>
+                    </div>
+
+                    {/* Card 2: Apply AI Suggestions to All */}
+                    <div
+                      style={{
+                        background: "rgba(5, 150, 105, 0.08)",
+                        border: "1px solid rgba(16, 185, 129, 0.25)",
+                        borderRadius: "8px",
+                        padding: "14px",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "space-between",
+                        gap: "10px",
+                      }}
+                    >
+                      <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                          <strong style={{ fontSize: "0.85rem", color: "#34D399" }}>Apply AI Suggestions to All</strong>
+                          <span className="badge success" style={{ fontSize: "0.7rem", padding: "2px 6px" }}>
+                            {applicableAiQuestions.length} applicable
+                          </span>
+                        </div>
+                        <p style={{ margin: 0, fontSize: "0.76rem", color: "var(--text-secondary)", lineHeight: "1.35" }}>
+                          Apply the reviewed AI answer suggestions across all questions.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={applicableAiQuestions.length === 0 || isProcessingBulk || isBatchFilling}
+                        onClick={() => setBulkConfirmationModal({ type: "apply_ai", count: applicableAiQuestions.length })}
+                        style={{
+                          padding: "8px 14px",
+                          fontSize: "0.80rem",
+                          fontWeight: 600,
+                          background: "#059669",
+                          border: "1px solid #10B981",
+                          color: "#FFFFFF",
+                          borderRadius: "6px",
+                          boxShadow: "0 2px 6px rgba(16, 185, 129, 0.25)",
+                          cursor: (applicableAiQuestions.length === 0 || isProcessingBulk || isBatchFilling) ? "not-allowed" : "pointer",
+                          opacity: (applicableAiQuestions.length === 0 || isProcessingBulk || isBatchFilling) ? 0.45 : 1,
+                          width: "100%",
+                          justifyContent: "center",
+                        }}
+                      >
+                        Apply AI Suggestions to All
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                {/* 3 Pillars: Source Answer, AI Suggested Answer, Final Answer */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px" }}>
-                  
-                  {/* 1. Source Answer (Extracted) */}
-                  <div
-                    style={{
-                      background: "rgba(0, 0, 0, 0.25)",
-                      border: "1px solid var(--border-subtle)",
-                      borderRadius: "8px",
-                      padding: "12px",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                        <span style={{ fontSize: "0.74rem", fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase" }}>
-                          Source Answer
-                        </span>
-                        <span className={`badge ${sourceAnswerVal ? "success" : "danger"}`} style={{ fontSize: "0.68rem" }}>
-                          {sourceAnswerVal ? "EXTRACTED" : "MISSING"}
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "1.05rem",
-                          fontWeight: 800,
-                          color: sourceAnswerVal ? "var(--text-primary)" : "var(--danger)",
-                          margin: "6px 0",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {sourceAnswerVal || "MISSING"}
-                      </div>
-                      <div style={{ fontSize: "0.70rem", color: "var(--text-muted)" }}>
-                        {currentQuestion.answer_page ? `Page ${currentQuestion.answer_page} · ${currentQuestion.answer_source || "Explicit Key"}` : "Extracted from source"}
-                      </div>
+                {/* Simplified Status View */}
+                {isConflict ? (
+                  <div style={{ background: "rgba(239, 68, 68, 0.05)", border: "1px solid rgba(239, 68, 68, 0.25)", borderRadius: "8px", padding: "14px", marginBottom: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--danger)", fontWeight: 700, fontSize: "1rem", marginBottom: "6px" }}>
+                      <AlertTriangleIcon size={16} /> Answer Conflict
                     </div>
-
-                    {isAnswerConflict && sourceAnswerVal && (
-                      <button
-                        type="button"
-                        className="secondary"
-                        onClick={() => handleSetFinalAnswer(sourceAnswerVal)}
-                        style={{ marginTop: "10px", padding: "4px 8px", fontSize: "0.74rem", width: "100%", justifyContent: "center" }}
-                      >
-                        Use Source as Final
-                      </button>
-                    )}
-                  </div>
-
-                  {/* 2. AI Suggested Answer */}
-                  <div
-                    style={{
-                      background: "rgba(124, 58, 237, 0.06)",
-                      border: "1px solid rgba(124, 58, 237, 0.3)",
-                      borderRadius: "8px",
-                      padding: "12px",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                        <span style={{ fontSize: "0.74rem", fontWeight: 600, color: "var(--primary-hover)", textTransform: "uppercase" }}>
-                          AI Suggested Answer
-                        </span>
-                        <span className="badge" style={{ background: "rgba(124, 58, 237, 0.2)", color: "var(--primary-hover)", fontSize: "0.68rem" }}>
-                          AI SUGGESTED
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "1.05rem",
-                          fontWeight: 800,
-                          color: "var(--primary-hover)",
-                          margin: "6px 0",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {aiAnswerVal || "—"}
-                      </div>
-                      <div style={{ fontSize: "0.70rem", color: "var(--text-muted)" }}>
-                        Confidence: <strong style={{ color: "var(--primary-hover)" }}>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
-                        {currentQuestion.validation?.ai_validation?.reason && (
-                          <div style={{ fontStyle: "italic", marginTop: "3px", fontSize: "0.68rem", lineHeight: "1.3" }}>
-                            {currentQuestion.validation.ai_validation.reason}
-                          </div>
-                        )}
-                      </div>
+                    <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "12px" }}>
+                      The AI answer does not match the source answer.
                     </div>
-
-                    {isAnswerConflict && aiAnswerVal && (
-                      <button
-                        type="button"
-                        className="accent"
-                        onClick={() => handleSetFinalAnswer(aiAnswerVal)}
-                        style={{ marginTop: "10px", padding: "4px 8px", fontSize: "0.74rem", width: "100%", justifyContent: "center" }}
-                      >
-                        Use AI as Final
-                      </button>
-                    )}
-                  </div>
-
-                  {/* 3. Final Answer (Export Decision) */}
-                  <div
-                    style={{
-                      background: "rgba(16, 185, 129, 0.06)",
-                      border: "1px solid rgba(16, 185, 129, 0.35)",
-                      borderRadius: "8px",
-                      padding: "12px",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                        <span style={{ fontSize: "0.74rem", fontWeight: 600, color: "var(--accent)", textTransform: "uppercase" }}>
-                          Final Answer
-                        </span>
-                        <span className="badge success" style={{ fontSize: "0.68rem" }}>
-                          FINAL
-                        </span>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px" }}>
+                      <div style={{ background: "rgba(0,0,0,0.15)", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ fontSize: "0.74rem", color: "var(--text-muted)", textTransform: "uppercase" }}>Source Answer</div>
+                        <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                          {sourceKey ? `${sourceKey} → ${sourceText}` : "Missing"}
+                        </div>
                       </div>
-
-                      {/* Dropdown Select */}
-                      <div style={{ marginTop: "6px" }}>
-                        <select
-                          value={finalAnswerVal}
-                          onChange={(e) => handleSetFinalAnswer(e.target.value)}
-                          style={{ width: "100%", padding: "6px 8px", fontSize: "0.88rem", fontWeight: 700, marginBottom: "6px" }}
-                        >
-                          <option value="">— Select Final Answer —</option>
-                          {availableOptionChoices.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-
-                        {/* Direct text input for custom editing */}
-                        <input
-                          type="text"
-                          value={finalAnswerVal}
-                          onChange={(e) => handleSetFinalAnswer(e.target.value)}
-                          placeholder="Or type custom final answer..."
-                          style={{ width: "100%", padding: "5px 8px", fontSize: "0.82rem", marginBottom: "6px" }}
-                        />
-
-                        {/* Quick Option Choice Buttons */}
-                        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-                          {["A", "B", "C", "D"].map((letter) => (
-                            <button
-                              key={letter}
-                              type="button"
-                              className={finalAnswerVal.toUpperCase() === letter ? "primary" : "secondary"}
-                              onClick={() => handleSetFinalAnswer(letter)}
-                              style={{ padding: "2px 6px", fontSize: "0.72rem", flex: "1 1 0" }}
-                            >
-                              {letter}
-                            </button>
-                          ))}
+                      <div style={{ background: "rgba(0,0,0,0.15)", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ fontSize: "0.74rem", color: "var(--text-muted)", textTransform: "uppercase" }}>AI Verification</div>
+                        <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--primary-hover)" }}>
+                          {aiKey ? `${aiKey} → ${aiText}` : "None"}
                         </div>
                       </div>
                     </div>
-
-                    {isAnswerConflict && (
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginBottom: "12px" }}>
+                      Confidence: <strong>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => handleSetFinalAnswer(sourceKey)}
+                        style={{ padding: "6px 12px", fontSize: "0.8rem", fontWeight: 600 }}
+                      >
+                        Keep Source Answer ({sourceKey})
+                      </button>
                       <button
                         type="button"
                         className="accent"
-                        onClick={() => {
-                          if (currentQuestion.validation) {
-                            currentQuestion.validation.valid = true;
-                          }
-                          handleSetFinalAnswer(finalAnswerVal || aiAnswerVal || sourceAnswerVal || "A");
-                        }}
-                        style={{ marginTop: "8px", padding: "4px 8px", fontSize: "0.74rem", width: "100%", justifyContent: "center", gap: "4px" }}
+                        onClick={() => handleSetFinalAnswer(aiKey)}
+                        style={{ padding: "6px 12px", fontSize: "0.8rem", fontWeight: 600 }}
                       >
-                        <CheckIcon size={12} /> Approve Final Answer
+                        Use AI Suggestion ({aiKey})
                       </button>
-                    )}
+                    </div>
+                  </div>
+                ) : isMissing ? (
+                  <div style={{ background: "rgba(245, 158, 11, 0.05)", border: "1px solid rgba(245, 158, 11, 0.25)", borderRadius: "8px", padding: "14px", marginBottom: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--warning)", fontWeight: 700, fontSize: "1rem", marginBottom: "6px" }}>
+                      <SparklesIcon size={16} /> Missing Answer
+                    </div>
+                    <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "12px" }}>
+                      No correct answer was found in the source document. AI has suggested an answer.
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px" }}>
+                      <div style={{ background: "rgba(0,0,0,0.15)", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ fontSize: "0.74rem", color: "var(--text-muted)", textTransform: "uppercase" }}>Source Answer</div>
+                        <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--danger)" }}>Missing</div>
+                      </div>
+                      <div style={{ background: "rgba(0,0,0,0.15)", padding: "8px", borderRadius: "6px" }}>
+                        <div style={{ fontSize: "0.74rem", color: "var(--text-muted)", textTransform: "uppercase" }}>AI Verification</div>
+                        <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--primary-hover)" }}>
+                          {aiKey ? `${aiKey} → ${aiText}` : "None"}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginBottom: "12px" }}>
+                      Confidence: <strong>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <button
+                        type="button"
+                        className="accent"
+                        onClick={() => handleSetFinalAnswer(aiKey)}
+                        style={{ padding: "6px 12px", fontSize: "0.8rem", fontWeight: 600 }}
+                      >
+                        Use AI Suggestion ({aiKey})
+                      </button>
+                    </div>
+                  </div>
+                ) : isAmbiguity ? (
+                  <div style={{ background: "rgba(245, 158, 11, 0.05)", border: "1px solid rgba(245, 158, 11, 0.25)", borderRadius: "8px", padding: "14px", marginBottom: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--warning)", fontWeight: 700, fontSize: "1rem", marginBottom: "6px" }}>
+                      <AlertTriangleIcon size={16} /> Ambiguous Answer
+                    </div>
+                    <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "6px" }}>
+                      {duplicateOptionsMessage || "Two options contain the same answer value or the option mapping is ambiguous."}
+                    </div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                      Confidence: <strong>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ background: "rgba(16, 185, 129, 0.05)", border: "1px solid rgba(16, 185, 129, 0.25)", borderRadius: "8px", padding: "14px", marginBottom: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--accent)", fontWeight: 700, fontSize: "1rem", marginBottom: "6px" }}>
+                      <CheckCircleIcon size={16} /> Answer Verified
+                    </div>
+                    <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "6px" }}>
+                      Source Answer: <strong>{sourceKey ? `${sourceKey} → ${sourceText}` : "None"}</strong> | AI Verification: <strong>{aiKey ? `${aiKey} → ${aiText}` : "None"}</strong>
+                    </div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                      Confidence: <strong>{(aiConfidenceVal * 100).toFixed(0)}%</strong>
+                    </div>
+                  </div>
+                )}
+
+                {/* Final Decision Input row */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "12px", borderTop: "1px solid var(--border-subtle)", paddingTop: "12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--text-secondary)" }}>
+                      Final Selection:
+                    </span>
+                    <select
+                      value={finalKey}
+                      onChange={(e) => handleSetFinalAnswer(e.target.value)}
+                      style={{ padding: "6px 10px", fontSize: "0.84rem", fontWeight: 700, borderRadius: "6px", border: "1px solid var(--border-medium)", background: "var(--bg-surface)", minWidth: "160px" }}
+                    >
+                      <option value="">— Select Option —</option>
+                      {availableOptionChoices.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                    
+                    <input
+                      type="text"
+                      value={finalAnswerVal}
+                      onChange={(e) => handleSetFinalAnswer(e.target.value)}
+                      placeholder="Or type custom final answer..."
+                      style={{ padding: "6px 10px", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border-medium)", flex: 1, background: "var(--bg-surface)" }}
+                    />
                   </div>
 
+                  <div style={{ display: "flex", gap: "6px", marginTop: "4px" }}>
+                    {["A", "B", "C", "D"].map((letter) => {
+                      const isSelected = finalKey === letter;
+                      return (
+                        <button
+                          key={letter}
+                          type="button"
+                          className={isSelected ? "primary" : "secondary"}
+                          onClick={() => handleSetFinalAnswer(letter)}
+                          style={{ padding: "4px 10px", fontSize: "0.74rem", flex: 1, justifyContent: "center" }}
+                        >
+                          {letter}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -1301,11 +1698,7 @@ export default function ReviewStep({
               >
                 <button
                   className="accent"
-                  onClick={() => {
-                    if (currentIndex < questions.length - 1) {
-                      setCurrentIndex((prev) => prev + 1);
-                    }
-                  }}
+                  onClick={handleApproveAndNext}
                   style={{ gap: "6px" }}
                 >
                   <CheckIcon size={14} /> Approve & Next Question
@@ -1366,11 +1759,11 @@ export default function ReviewStep({
 
             <button
               className="accent"
-              onClick={() => handleTriggerAIFill(false)}
-              disabled={isAiFilling}
+              onClick={() => handleTriggerBatchAIFill()}
+              disabled={isAiFilling || isBatchFilling}
               style={{ padding: "10px 16px", fontSize: "0.85rem", gap: "6px" }}
             >
-              <SparklesIcon size={16} /> {isAiFilling ? "Inferring Missing Fields..." : "✨ Fill Missing Fields with AI"}
+              <SparklesIcon size={16} /> {(isAiFilling || isBatchFilling) ? "Inferring Missing Fields..." : "✨ Fill Missing Fields with AI"}
             </button>
           </div>
 
@@ -1546,6 +1939,137 @@ export default function ReviewStep({
 
               <button className="accent" onClick={handleAcceptAllSuggestions} style={{ gap: "6px" }}>
                 <CheckIcon size={16} /> Accept All Suggestions
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Generic Bulk Action Confirmation Modal */}
+      {bulkConfirmationModal && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.75)",
+            backdropFilter: "blur(6px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 110,
+            padding: "20px",
+          }}
+        >
+          <div
+            style={{
+              background: "var(--bg-card-solid)",
+              border: "1px solid var(--border-medium)",
+              borderRadius: "16px",
+              padding: "24px",
+              maxWidth: "520px",
+              width: "100%",
+              boxShadow: "0 20px 40px rgba(0, 0, 0, 0.6)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "14px" }}>
+              <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 800, color: "var(--text-primary)" }}>
+                {bulkConfirmationModal.type === "keep_source"
+                  ? "KEEP SOURCE ANSWERS FOR ALL?"
+                  : bulkConfirmationModal.type === "apply_ai"
+                  ? "APPLY AI SUGGESTIONS TO ALL?"
+                  : "FILL ALL MISSING FIELDS WITH AI"}
+              </h3>
+              <button
+                className="secondary"
+                onClick={() => setBulkConfirmationModal(null)}
+                style={{ padding: "4px 8px" }}
+              >
+                <XIcon size={16} />
+              </button>
+            </div>
+
+            <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", lineHeight: "1.5", marginBottom: "16px" }}>
+              {bulkConfirmationModal.type === "keep_source" && (
+                <div>
+                  <p style={{ marginTop: 0 }}>
+                    This will keep the original source answer for every question in this assessment.
+                  </p>
+                  <div style={{ background: "rgba(0,0,0,0.25)", padding: "10px 14px", borderRadius: "8px", margin: "10px 0" }}>
+                    <div><strong>Questions affected:</strong> {bulkConfirmationModal.count} of {localQuestions.length}</div>
+                    <div style={{ color: "var(--accent)", marginTop: "4px", fontSize: "0.78rem" }}>
+                      ✓ AI suggestions will NOT replace the source answers.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {bulkConfirmationModal.type === "apply_ai" && (
+                <div>
+                  <p style={{ marginTop: 0 }}>
+                    This will apply the AI answer suggestions across the selected questions.
+                  </p>
+                  <div style={{ background: "rgba(0,0,0,0.25)", padding: "10px 14px", borderRadius: "8px", margin: "10px 0" }}>
+                    <div><strong>Questions affected:</strong> {bulkConfirmationModal.count} of {localQuestions.length}</div>
+                  </div>
+                  <div style={{ background: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.3)", borderRadius: "8px", padding: "10px", color: "#FDE68A", fontSize: "0.80rem" }}>
+                    <strong>Explicit Warning:</strong> AI suggestions are not authoritative unless you approve them.
+                  </div>
+                </div>
+              )}
+
+              {bulkConfirmationModal.type === "fill_missing" && (
+                <div>
+                  <p style={{ marginTop: 0 }}>
+                    AI will analyze the available source content and fill eligible missing metadata fields across all questions.
+                  </p>
+                  <div style={{ background: "rgba(0,0,0,0.25)", padding: "10px 14px", borderRadius: "8px", margin: "10px 0" }}>
+                    <div><strong>Questions:</strong> {bulkConfirmationModal.count}</div>
+                    <div><strong>Missing fields:</strong> {bulkConfirmationModal.missingFieldsCount ?? 0}</div>
+                  </div>
+                  <ul style={{ margin: "10px 0 0 0", paddingLeft: "18px", fontSize: "0.78rem", color: "var(--text-muted)", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <li>Never overwrites existing source values.</li>
+                    <li>Never invents authoritative source answers.</li>
+                    <li>Preserves source answers separately from AI answers.</li>
+                    <li>AI-generated values remain marked as AI_INFERRED with individual confidence.</li>
+                    <li>Fields that cannot be safely inferred remain MISSING for manual review.</li>
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", borderTop: "1px solid var(--border-subtle)", paddingTop: "14px" }}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setBulkConfirmationModal(null)}
+                style={{ padding: "8px 16px" }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => {
+                  if (bulkConfirmationModal.type === "keep_source") {
+                    executeBulkAnswerAction("source");
+                  } else if (bulkConfirmationModal.type === "apply_ai") {
+                    executeBulkAnswerAction("ai");
+                  } else if (bulkConfirmationModal.type === "fill_missing") {
+                    setBulkConfirmationModal(null);
+                    handleTriggerBatchAIFill();
+                  }
+                }}
+                style={{
+                  padding: "8px 18px",
+                  background: bulkConfirmationModal.type === "apply_ai" ? "#059669" : "var(--primary)",
+                  borderColor: bulkConfirmationModal.type === "apply_ai" ? "#10B981" : "var(--primary-hover)",
+                }}
+              >
+                {bulkConfirmationModal.type === "keep_source"
+                  ? "Keep Source Answers for All"
+                  : bulkConfirmationModal.type === "apply_ai"
+                  ? "Apply AI Suggestions"
+                  : "Fill All Missing Fields"}
               </button>
             </div>
           </div>

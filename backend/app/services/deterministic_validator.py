@@ -369,22 +369,22 @@ def deterministic_unit_conversion_solve(question_stem: str, options: list[str]) 
         calculated_val = n / 1000
         reasoning = f"Converted {n} grams to kg: {n} / 1000 = {calculated_val} kg."
 
-    # Time Conversions: "How many seconds in 2 hours?"
-    hr_to_sec = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr\b)\s*(?:to|in|is equal to)\s*(?:seconds?|secs?|s\b)", stem_lower)
+    # Time Conversions: "How many seconds in 2 hours?" or "Convert 2 hours to seconds"
+    hr_to_sec = re.search(r"(?:(?:how many\s+)?(?:seconds?|secs?|s\b)\s*(?:are\s+)?(?:in|to)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr\b)|(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr\b)\s*(?:to|in|is equal to)\s*(?:seconds?|secs?|s\b))", stem_lower)
     if calculated_val is None and hr_to_sec:
-        n = float(hr_to_sec.group(1))
+        n = float(hr_to_sec.group(1) or hr_to_sec.group(2))
         calculated_val = int(n * 3600) if (n * 3600).is_integer() else n * 3600
         reasoning = f"Converted {n} hours to seconds: {n} * 3600 = {calculated_val} s."
 
-    hr_to_min = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr\b)\s*(?:to|in|is equal to)\s*(?:minutes?|mins?|min\b)", stem_lower)
+    hr_to_min = re.search(r"(?:(?:how many\s+)?(?:minutes?|mins?|min\b)\s*(?:are\s+)?(?:in|to)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr\b)|(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr\b)\s*(?:to|in|is equal to)\s*(?:minutes?|mins?|min\b))", stem_lower)
     if calculated_val is None and hr_to_min:
-        n = float(hr_to_min.group(1))
+        n = float(hr_to_min.group(1) or hr_to_min.group(2))
         calculated_val = int(n * 60) if (n * 60).is_integer() else n * 60
         reasoning = f"Converted {n} hours to minutes: {n} * 60 = {calculated_val} min."
 
-    min_to_sec = re.search(r"(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min\b)\s*(?:to|in|is equal to)\s*(?:seconds?|secs?|s\b)", stem_lower)
+    min_to_sec = re.search(r"(?:(?:how many\s+)?(?:seconds?|secs?|s\b)\s*(?:are\s+)?(?:in|to)\s*(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min\b)|(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min\b)\s*(?:to|in|is equal to)\s*(?:seconds?|secs?|s\b))", stem_lower)
     if calculated_val is None and min_to_sec:
-        n = float(min_to_sec.group(1))
+        n = float(min_to_sec.group(1) or min_to_sec.group(2))
         calculated_val = int(n * 60) if (n * 60).is_integer() else n * 60
         reasoning = f"Converted {n} minutes to seconds: {n} * 60 = {calculated_val} s."
 

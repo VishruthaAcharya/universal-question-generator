@@ -172,6 +172,11 @@ def validate_single_question_answer(
                     res["review_priority"] = 1
                 else:
                     res["answer_match"] = True
+            elif not source_letter:
+                res["answer_match"] = False
+                res["validation_status"] = "MISSING_ANSWER"
+                res["review_required"] = True
+                res["review_priority"] = 2
             return res
 
     # 2. Defect & Quality Check
@@ -302,7 +307,11 @@ def validate_single_question_answer(
             answer_match = True
     elif not source_letter:
         # No source answer provided
-        answer_match = None
+        answer_match = False
+        validation_status = "MISSING_ANSWER"
+        review_required = True
+        review_priority = 2
+        final_reasoning = "Source answer is missing. AI has provided a suggestion."
 
     signals_payload = {
         "solver_agreed": bool(solver_letter),

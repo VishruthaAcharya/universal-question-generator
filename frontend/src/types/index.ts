@@ -24,14 +24,30 @@ export interface AIValidationResult {
   };
 }
 
+export interface AIFillResult {
+  status: "updated" | "already_complete" | "needs_review" | "unable_to_infer" | "failed" | "skipped_with_reason";
+  resolved_count: number;
+  unresolved_count: number;
+  review_required_count: number;
+  resolved_fields?: string[];
+  review_required_fields?: string[];
+  unresolved_fields?: string[];
+  message?: string;
+}
+
 export type QuestionRow = {
   id: string;
   row_number: number;
   data_json: Record<string, string>;
   source_answer?: string | null;
+  source_answer_key?: string | null;
+  source_answer_text?: string | null;
   ai_answer?: string | null;
+  ai_answer_key?: string | null;
   ai_answer_text?: string | null;
   final_answer?: string | null;
+  final_answer_key?: string | null;
+  final_answer_text?: string | null;
   answer_source?: "EXPLICIT_ANSWER_KEY" | "QUESTION_TEXT" | "STRUCTURED_SOURCE" | "AI_SEMANTIC_MAPPING" | "AI_SUGGESTED" | "HUMAN_ENTERED" | "MISSING" | string | null;
   answer_page?: number | null;
   answer_section?: string | null;
@@ -54,12 +70,17 @@ export type QuestionRow = {
     fields: Record<
       string,
       {
-        origin: "extracted" | "inferred" | "missing" | "user_edited";
+        origin: "extracted" | "inferred" | "missing" | "user_edited" | "AI_INFERRED" | string;
+        status?: "AI_INFERRED" | "MISSING" | "REVIEW_REQUIRED" | string;
         confidence: number;
         reason?: string;
+        value?: string;
+        ai_suggestion?: string;
+        review_required?: boolean;
       }
     >;
   } | null;
+  ai_fill_result?: AIFillResult;
   status: string;
   review_status?: "PENDING" | "APPROVED" | "FLAGGED" | "REJECTED";
   review_notes?: string;

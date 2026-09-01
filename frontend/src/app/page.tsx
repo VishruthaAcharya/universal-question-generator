@@ -11,12 +11,14 @@ import type {
   AIFillSuggestion,
 } from "../types";
 import {
-  uploadSource,
+  uploadSourceTemp,
+  processSourceBatch,
   checkCompatibility,
   mapQuestions,
   updateQuestion,
   exportQuestionSet,
 } from "../lib/api";
+import type { BatchFileItem } from "../components/steps/SourceStep";
 import MenntrAppShell from "../components/MenntrAppShell";
 import AlertPanel from "../components/AlertPanel";
 import TemplateStep from "../components/steps/TemplateStep";
@@ -49,12 +51,15 @@ export default function Home() {
   const [templateName, setTemplateName] = useState<string>("");
   const [templateSchema, setTemplateSchema] = useState<TemplateSchema | null>(null);
 
-  // Source Document & Raw Extracted Questions
-  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  // Source Documents & Raw Extracted Questions
+  const [files, setFiles] = useState<BatchFileItem[]>([]);
+  const [batchId, setBatchId] = useState<string>("");
   const [sourceData, setSourceData] = useState<{
     source_filename: string;
     source_type: string;
     questions: Record<string, any>[];
+    statistics?: Record<string, any>;
+    warning?: string | null;
   } | null>(null);
 
   // All extracted raw questions (e.g. 28 detected)
@@ -74,6 +79,11 @@ export default function Home() {
   const [mappingProgress, setMappingProgress] = useState<string>("");
   const [error, setError] = useState<string>("");
 
+  // Config limits matching backend defaults
+  const MAX_SINGLE_FILE_SIZE_MB = 25;
+  const MAX_ZIP_SIZE_MB = 50;
+  const MAX_FILES_PER_BATCH = 20;
+
   // Handler: Selected Template from Registry or Custom Upload
   function handleTemplateSelected(id: string, name: string, schema: TemplateSchema) {
     setTemplateId(id);
@@ -81,23 +91,177 @@ export default function Home() {
     setTemplateSchema(schema);
   }
 
-  // Handler: Source Upload & Complete Extraction
-  async function handleSourceUpload(file: File) {
+  // Helper to generate unique local IDs
+  const generateId = () => Math.random().toString(36).substring(2, 9);
+
+  // Handler: Add files to state and upload them
+  async function handleAddFiles(newFiles: File[]) {
+    if (files.length + newFiles.length > MAX_FILES_PER_BATCH) {
+      setError(`Maximum batch limit is ${MAX_FILES_PER_BATCH} files.`);
+      return;
+    }
+
+    let activeBatchId = batchId;
+    if (!activeBatchId) {
+      const generated = Math.random().toString(36).substring(2, 15);
+      setBatchId(generated);
+      activeBatchId = generated;
+    }
+
+    // Validate limits
+    const validatedFiles: File[] = [];
+    for (const f of newFiles) {
+      const ext = f.name.split(".").pop()?.toLowerCase();
+      if (ext === "zip") {
+        if (f.size > MAX_ZIP_SIZE_MB * 1024 * 1024) {
+          setError(`${f.name} exceeds the maximum ZIP size of ${MAX_ZIP_SIZE_MB} MB.`);
+          return;
+        }
+      } else {
+        if (f.size > MAX_SINGLE_FILE_SIZE_MB * 1024 * 1024) {
+          setError(`${f.name} exceeds the maximum size of ${MAX_SINGLE_FILE_SIZE_MB} MB.`);
+          return;
+        }
+      }
+      validatedFiles.push(f);
+    }
+
+    setError("");
+
+    // Create file items in pending state
+    const newItems: BatchFileItem[] = validatedFiles.map((f) => ({
+      id: generateId(),
+      name: f.name,
+      size: f.size,
+      status: "pending",
+      progress: 0,
+    }));
+
+    setFiles((prev) => [...prev, ...newItems]);
+
+    // Upload each file asynchronously
+    for (let i = 0; i < validatedFiles.length; i++) {
+      const file = validatedFiles[i];
+      const item = newItems[i];
+
+      setFiles((prev) =>
+        prev.map((f) => (f.id === item.id ? { ...f, status: "uploading", progress: 20 } : f))
+      );
+
+      try {
+        const res = await uploadSourceTemp(file, activeBatchId);
+        
+        if (res.is_zip) {
+          // Replace zip item with extracted files
+          const extractedItems: BatchFileItem[] = res.extracted_files.map((ef) => ({
+            id: generateId(),
+            name: ef.source_file,
+            size: ef.size_bytes,
+            status: "success",
+            progress: 100,
+            absolute_path: ef.absolute_path,
+            parent_source: ef.parent_source,
+          }));
+
+          const unsupportedItems: BatchFileItem[] = res.unsupported_files.map((uf) => ({
+            id: generateId(),
+            name: uf.filename,
+            size: 0,
+            status: "error",
+            progress: 100,
+            error: uf.reason,
+            parent_source: uf.parent_source,
+          }));
+
+          setFiles((prev) => {
+            const listWithoutZip = prev.filter((f) => f.id !== item.id);
+            return [...listWithoutZip, ...extractedItems, ...unsupportedItems];
+          });
+        } else {
+          // Regular file
+          const singleFile = res.extracted_files[0];
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === item.id
+                ? {
+                    ...f,
+                    status: "success",
+                    progress: 100,
+                    absolute_path: singleFile.absolute_path,
+                    parent_source: singleFile.parent_source,
+                  }
+                : f
+            )
+          );
+        }
+      } catch (e) {
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === item.id
+              ? { ...f, status: "error", progress: 0, error: e instanceof Error ? e.message : "Failed to upload" }
+              : f
+          )
+        );
+      }
+    }
+  }
+
+  // Handler: Remove file from list
+  function handleRemoveFile(id: string) {
+    setFiles((prev) => {
+      const updated = prev.filter((f) => f.id !== id);
+      if (updated.length === 0) {
+        setSourceData(null);
+        setRawQuestions([]);
+        setSelectedIndices([]);
+      }
+      return updated;
+    });
+  }
+
+  // Handler: Batch Process Ingested Files
+  async function handleProcessBatch() {
+    const filesToProcess = files
+      .filter((f) => f.status === "success" && f.absolute_path)
+      .map((f) => ({
+        absolute_path: f.absolute_path!,
+        parent_source: f.parent_source || null,
+        source_file: f.name,
+        size_bytes: f.size,
+      }));
+
+    if (filesToProcess.length === 0) {
+      setError("No files are successfully uploaded and ready to process.");
+      return;
+    }
+
     setLoading(true);
     setError("");
-    setExtractionProgress("Extracting text nodes, OCR scanning, and detecting ALL question blocks...");
+    setExtractionProgress("Reading pages and classifying roles...");
+
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.status === "success" && f.absolute_path ? { ...f, status: "processing" } : f
+      )
+    );
+
     try {
-      const res = await uploadSource(file);
-      setSourceFile(file);
+      const res = await processSourceBatch(filesToProcess, (msg) => setExtractionProgress(msg));
       setSourceData(res);
       setRawQuestions(res.questions || []);
-      // Default to selecting ALL detected questions
+      
       const allIndices = (res.questions || []).map((_, i) => i);
       setSelectedIndices(allIndices);
+      
+      setFiles((prev) =>
+        prev.map((f) => (f.status === "processing" ? { ...f, status: "success" } : f))
+      );
       setExtractionProgress("Extraction complete!");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to parse source document");
-      setSourceFile(null);
+      setError(e instanceof Error ? e.message : "Failed to process files");
+      setFiles((prev) =>
+        prev.map((f) => (f.status === "processing" ? { ...f, status: "error", error: "Processing failed" } : f))
+      );
       setSourceData(null);
       setRawQuestions([]);
       setSelectedIndices([]);
@@ -112,35 +276,22 @@ export default function Home() {
     return selectedIndices.map((idx) => rawQuestions[idx]).filter(Boolean);
   };
 
-  // Handler: Compatibility Check for Selected Questions
-  async function proceedToCompatibility() {
+  // Handler: Execute full mapping & validation pipeline, proceeding to Human Review
+  async function proceedToReview() {
     if (!templateId || selectedIndices.length === 0) return;
     setLoading(true);
     setError("");
+    setExtractionProgress("Checking schema compatibility...");
     try {
       const activeQuestions = getSelectedQuestions();
       const report = await checkCompatibility(templateId, activeQuestions);
       setCompatibility(report);
-      setCurrentStep("mapping");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Schema compatibility check failed");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Handler: Execute AI Mapping
-  async function proceedToMapping() {
-    if (!templateId || selectedIndices.length === 0) return;
-    setLoading(true);
-    setError("");
-    setMappingProgress("Mapping source fields...");
-    try {
-      const activeQuestions = getSelectedQuestions();
+      
+      setExtractionProgress("Mapping fields & validating answers...");
       const result = await mapQuestions(
         templateId,
         activeQuestions,
-        sourceData?.source_filename || sourceFile?.name || "source_file",
+        sourceData?.source_filename || files[0]?.name || "source_file",
         sourceData?.source_type || "pdf",
         batchConfig.subject || "General",
         {
@@ -148,17 +299,17 @@ export default function Home() {
           chapterTopic: batchConfig.chapterTopic,
           questionType: batchConfig.questionType,
         },
-        (msg) => setMappingProgress(msg)
+        (msg) => setExtractionProgress(msg)
       );
       setQuestionSetId(result.question_set_id);
       setColumns(result.columns);
       setQuestions(result.questions);
-      setCurrentStep("validation");
+      setCurrentStep("review");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Question mapping failed");
+      setError(e instanceof Error ? e.message : "Question processing failed");
     } finally {
       setLoading(false);
-      setMappingProgress("");
+      setExtractionProgress("");
     }
   }
 
@@ -197,18 +348,19 @@ export default function Home() {
     }
   }
 
-  // Handler: Export
-  async function handleExport(format: "csv" | "xlsx") {
+  // Handler: Export (Certified or Draft/Review)
+  async function handleExport(format: "csv" | "xlsx", isDraft: boolean = false) {
     if (!questionSetId) return;
     setLoading(true);
     setError("");
     try {
-      const blob = await exportQuestionSet(questionSetId, format);
+      const blob = await exportQuestionSet(questionSetId, format, isDraft);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
+      const prefix = isDraft ? "draft_review_" : "certified_";
       const safeTitle = (batchConfig.assessmentName || "menntr_assessment").replace(/\s+/g, "_").toLowerCase();
-      a.download = `${safeTitle}_export.${format}`;
+      a.download = `${prefix}${safeTitle}_export.${format}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -259,14 +411,16 @@ export default function Home() {
         />
       )}
 
-      {/* Step 2: Source Files Upload & Full Extraction */}
+      {/* Step 2: Source Files Ingestion & Infill Parsing */}
       {currentStep === "source" && (
         <SourceStep
-          sourceFile={sourceFile}
+          files={files}
           sourceData={sourceData}
           loading={loading}
           extractionProgress={extractionProgress}
-          onSourceChange={handleSourceUpload}
+          onAddFiles={handleAddFiles}
+          onRemoveFile={handleRemoveFile}
+          onProcessBatch={handleProcessBatch}
           onBack={() => setCurrentStep("templates")}
           onNext={() => setCurrentStep("selection")}
         />
@@ -283,62 +437,39 @@ export default function Home() {
             if (!templateId) {
               setCurrentStep("templates");
             } else {
-              proceedToCompatibility();
+              proceedToReview();
             }
           }}
         />
       )}
 
-      {/* Step 4: Schema Field Mapping & Compatibility */}
-      {currentStep === "mapping" && compatibility && (
-        <CompatibilityStep
-          compatibility={compatibility}
-          templateSchema={templateSchema}
-          selectedQuestionsCount={selectedIndices.length}
-          loading={loading}
-          mappingProgress={mappingProgress}
-          onBack={() => setCurrentStep("selection")}
-          onChangeTemplate={() => setCurrentStep("templates")}
-          onProceedToMapping={proceedToMapping}
-        />
-      )}
-
-      {/* Step 5: AI Validation Dashboard */}
-      {currentStep === "validation" && (
-        <ValidationStep
-          questions={questions}
-          columns={columns}
-          onProceedToReview={() => setCurrentStep("review")}
-          onBack={() => setCurrentStep("mapping")}
-        />
-      )}
-
-      {/* Step 6: Human Review & AI-Assisted Workspace */}
+      {/* Step 4: Human Review & AI-Assisted Workspace */}
       {currentStep === "review" && (
         <ReviewStep
           columns={columns}
           questions={questions}
-          sourceFilename={sourceData?.source_filename || sourceFile?.name || ""}
+          sourceFilename={sourceData?.source_filename || files[0]?.name || ""}
           batchConfig={batchConfig}
           onCellChange={handleCellChange}
           onQuestionsUpdate={(updatedQuestions) => setQuestions(updatedQuestions)}
-          onBack={() => setCurrentStep("validation")}
+          onBack={() => setCurrentStep("selection")}
           onNext={() => setCurrentStep("quality")}
         />
       )}
 
-      {/* Step 7: Quality Dashboard & Quality Gate */}
+      {/* Step 5: Quality Dashboard & Quality Gate */}
       {currentStep === "quality" && (
         <QualityDashboardStep
           questions={questions}
           batchConfig={batchConfig}
           onProceedToExport={() => setCurrentStep("export")}
           onJumpToReview={() => setCurrentStep("review")}
+          onExportDraft={(format) => handleExport(format, true)}
           onBack={() => setCurrentStep("review")}
         />
       )}
 
-      {/* Step 8: Final Export & Publishing */}
+      {/* Step 6: Final Export & Publishing */}
       {currentStep === "export" && (
         <ExportStep
           batchConfig={batchConfig}
@@ -346,7 +477,7 @@ export default function Home() {
           totalQuestions={questions.length}
           hasValidationErrors={questions.some((q) => !q.validation.valid)}
           loading={loading}
-          onExport={handleExport}
+          onExport={(format, isDraft) => handleExport(format, isDraft)}
           onBack={() => setCurrentStep("quality")}
         />
       )}

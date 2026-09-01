@@ -1,0 +1,33 @@
+{
+  "version": "v3_validation",
+  "hash": "974b29d7bdd0d64a322c0e6402e8324ffff085748ea718fe88592b065b62fc21",
+  "result": {
+    "question_id": "q2",
+    "row_number": 2,
+    "ai_answer": "B",
+    "ai_answer_text": "Hydrogen",
+    "source_answer": "B",
+    "source_answer_text": "Hydrogen",
+    "answer_match": true,
+    "confidence": 0.9,
+    "confidence_level": "MEDIUM",
+    "validation_status": "AI_VALIDATED",
+    "validation_methods": [
+      "INDEPENDENT_AI_SOLVER",
+      "AI_BLIND_CRITIC_AGREED"
+    ],
+    "review_required": false,
+    "review_priority": 5,
+    "reason": "When zinc reacts with dilute sulfuric acid, it displaces hydrogen from the acid, producing zinc sulfate and hydrogen gas; the reaction is Zn + H2SO4 \u2192 ZnSO4 + H2\u2191.",
+    "subject": "Chemistry",
+    "signals": {
+      "solver_agreed": true,
+      "critic_agreed": true,
+      "deterministic_verified": false,
+      "extraction_confidence": 0.95,
+      "option_count": 4,
+      "defects_detected": [],
+      "vote_agreement_ratio": null
+    }
+  }
+}

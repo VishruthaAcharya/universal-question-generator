@@ -12,6 +12,7 @@ from app.models.models import Template, QuestionSet, Question
 from app.services.template import read_template_schema, normalize_field_name
 from app.services.source_parser import parse_source_document
 from app.services.validator import validate_compatibility, validate_question_row, validate_questions_batch
+from app.config import settings
 
 router = APIRouter(prefix="/api", tags=["generation"])
 
@@ -21,8 +22,95 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 _TEMPLATE_SCHEMA_CACHE = {}
 
 
+def get_option_text_by_key(data_json: dict, key: str) -> str:
+    if not key or not data_json:
+        return ""
+    key_upper = str(key).strip().upper()
+    if key_upper not in ("A", "B", "C", "D"):
+        return ""
+    idx = ord(key_upper) - ord("A") + 1  # 1 for A, 2 for B, 3 for C, 4 for D
+    target_names = {
+        f"option {key_upper.lower()}",
+        f"option_{key_upper.lower()}",
+        f"choice {key_upper.lower()}",
+        f"choice_{key_upper.lower()}",
+        f"option {idx}",
+        f"option_{idx}",
+        f"choice {idx}",
+        f"choice_{idx}",
+        f"answer {idx}",
+        f"answer_{idx}",
+        key_upper.lower(),
+        str(idx)
+    }
+    for k, v in data_json.items():
+        k_clean = str(k).strip().lower()
+        if k_clean in target_names or any(k_clean.endswith(t) for t in target_names):
+            val_str = str(v).strip()
+            if val_str:
+                return val_str
+    return ""
+
+
+def get_option_key_by_text(data_json: dict, text: str) -> str:
+    if not text or not data_json:
+        return ""
+    text_clean = str(text).strip().lower()
+    for letter in ("A", "B", "C", "D"):
+        opt_val = get_option_text_by_key(data_json, letter)
+        if opt_val and str(opt_val).strip().lower() == text_clean:
+            return letter
+    return ""
+
 def _build_question_response(q: Question) -> dict:
     """Shared helper: build the canonical question response dict from a Question ORM object."""
+    sm = q.source_metadata_json or {}
+    val = q.validation_json or {}
+    
+    source_answer_key = sm.get("source_answer_key") or val.get("ai_validation", {}).get("source_answer") or ""
+    source_answer_key = str(source_answer_key).strip()
+    
+    source_answer_text = sm.get("source_answer_text") or val.get("ai_validation", {}).get("source_answer_text") or ""
+    if not source_answer_text and source_answer_key in ("A", "B", "C", "D"):
+        source_answer_text = get_option_text_by_key(q.data_json, source_answer_key)
+        
+    ai_answer_key = sm.get("ai_answer_key") or val.get("ai_validation", {}).get("ai_answer") or ""
+    ai_answer_key = str(ai_answer_key).strip()
+    
+    ai_answer_text = sm.get("ai_answer_text") or val.get("ai_validation", {}).get("ai_answer_text") or ""
+    if not ai_answer_text and ai_answer_key in ("A", "B", "C", "D"):
+        ai_answer_text = get_option_text_by_key(q.data_json, ai_answer_key)
+
+    final_answer_key = sm.get("final_answer_key") or q.data_json.get("Correct Answer") or q.data_json.get("correct_answer") or ""
+    final_answer_key = str(final_answer_key).strip()
+    
+    final_answer_text = sm.get("final_answer_text") or ""
+    if not final_answer_text and final_answer_key in ("A", "B", "C", "D"):
+        final_answer_text = get_option_text_by_key(q.data_json, final_answer_key)
+        
+    # Parity alignment: if key isn't in A/B/C/D but text matches option, normalize
+    if source_answer_key not in ("A", "B", "C", "D"):
+        resolved_key = get_option_key_by_text(q.data_json, source_answer_key)
+        if resolved_key:
+            source_answer_text = source_answer_key
+            source_answer_key = resolved_key
+            
+    if ai_answer_key not in ("A", "B", "C", "D"):
+        resolved_key = get_option_key_by_text(q.data_json, ai_answer_key)
+        if resolved_key:
+            ai_answer_text = ai_answer_key
+            ai_answer_key = resolved_key
+
+    if final_answer_key not in ("A", "B", "C", "D"):
+        resolved_key = get_option_key_by_text(q.data_json, final_answer_key)
+        if resolved_key:
+            final_answer_text = final_answer_key
+            final_answer_key = resolved_key
+
+    mapping_conf_raw = sm.get("answer_mapping_score") or sm.get("mapping_confidence")
+    if mapping_conf_raw is None:
+        mapping_conf_raw = 0.95
+        
     return {
         "id": q.id,
         "row_number": q.row_number,
@@ -30,15 +118,21 @@ def _build_question_response(q: Question) -> dict:
         "validation": q.validation_json,
         "source_metadata": q.source_metadata_json,
         "status": q.status,
-        "source_answer": q.validation_json.get("ai_validation", {}).get("source_answer") if q.validation_json else None,
-        "ai_answer": q.validation_json.get("ai_validation", {}).get("ai_answer") if q.validation_json else None,
-        "final_answer": q.data_json.get("Correct Answer") or q.data_json.get("correct_answer"),
-        "answer_source": q.source_metadata_json.get("answer_source") if q.source_metadata_json else "EXPLICIT_ANSWER_KEY",
-        "answer_page": q.source_metadata_json.get("answer_page") if q.source_metadata_json else None,
-        "answer_section": q.source_metadata_json.get("answer_section") if q.source_metadata_json else None,
-        "mapping_confidence": q.source_metadata_json.get("mapping_confidence") if q.source_metadata_json else 0.95,
-        "answer_mapping_status": q.source_metadata_json.get("answer_mapping_status") if q.source_metadata_json else "ANSWER_MAPPED",
-        "mapping_reason": q.source_metadata_json.get("mapping_reason") if q.source_metadata_json else None,
+        "source_answer": source_answer_key,
+        "ai_answer": ai_answer_key,
+        "final_answer": final_answer_key,
+        "source_answer_key": source_answer_key,
+        "source_answer_text": source_answer_text,
+        "ai_answer_key": ai_answer_key,
+        "ai_answer_text": ai_answer_text,
+        "final_answer_key": final_answer_key,
+        "final_answer_text": final_answer_text,
+        "answer_source": sm.get("answer_source_file") or sm.get("answer_source") or "EXPLICIT_ANSWER_KEY",
+        "answer_page": sm.get("answer_source_page") or sm.get("answer_page"),
+        "answer_section": sm.get("answer_source_role") or sm.get("answer_section") or "Answer Key",
+        "mapping_confidence": mapping_conf_raw,
+        "answer_mapping_status": sm.get("answer_mapping_method") or sm.get("answer_mapping_status") or "ANSWER_MAPPED",
+        "mapping_reason": sm.get("mapping_reason") or sm.get("warnings"),
     }
 
 
@@ -203,6 +297,141 @@ async def upload_source(file: UploadFile = File(...)):
     finally:
         Path(path).unlink(missing_ok=True)
 
+
+TEMP_UPLOADS_DIR = Path("storage/temp_uploads")
+TEMP_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+@router.post("/sources/upload-temp")
+async def upload_temp_file(file: UploadFile = File(...), batch_id: str = Form(None)):
+    if not batch_id:
+        import uuid
+        batch_id = str(uuid.uuid4())
+        
+    filename = file.filename or "uploaded_file"
+    suffix = Path(filename).suffix.lower()
+    
+    # 1. Enforce file size limit check before writing to disk
+    content_size = 0
+    temp_dir = TEMP_UPLOADS_DIR / batch_id
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / filename
+    
+    max_size = (settings.max_zip_size_mb if suffix == ".zip" else settings.max_single_file_size_mb) * 1024 * 1024
+    
+    try:
+        with open(temp_path, "wb") as f:
+            while chunk := await file.read(65536):
+                content_size += len(chunk)
+                if content_size > max_size:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{filename} exceeds the maximum size limit of {max_size / 1024 / 1024:.0f} MB."
+                    )
+                    
+                f.write(chunk)
+    except HTTPException as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise e
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise HTTPException(status_code=400, detail=f"Failed to save upload: {e}")
+
+    # 2. If ZIP, safely validate & extract
+    if suffix == ".zip":
+        from app.services.zip_processor import process_and_extract_zip, ZipValidationError
+        extract_dir = temp_dir / f"_extracted_{Path(filename).stem}"
+        try:
+            res = process_and_extract_zip(
+                zip_path=str(temp_path),
+                extract_dir=str(extract_dir),
+                parent_zip_name=filename
+            )
+            temp_path.unlink(missing_ok=True)
+            return {
+                "batch_id": batch_id,
+                "is_zip": True,
+                "extracted_files": res["extracted_files"],
+                "unsupported_files": res["unsupported_files"]
+            }
+        except ZipValidationError as ve:
+            import shutil
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            temp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=str(ve))
+        except Exception as e:
+            import shutil
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            temp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Failed to extract ZIP: {e}")
+            
+    # For a normal file
+    return {
+        "batch_id": batch_id,
+        "is_zip": False,
+        "extracted_files": [
+            {
+                "absolute_path": str(temp_path),
+                "parent_source": None,
+                "source_file": filename,
+                "size_bytes": content_size
+            }
+        ],
+        "unsupported_files": []
+    }
+
+
+@router.post("/sources/process-batch")
+def process_source_batch(payload: dict = Body(...)):
+    """
+    Triggers concurrent parsing on multiple uploaded files or ZIP folders, yields
+    NDJSON progress, and returns the reconciled question pool.
+    """
+    import logging
+    logger = logging.getLogger("generation")
+    from fastapi.responses import StreamingResponse
+    from app.services.source_parser import parse_source_batch
+    
+    files = payload.get("files", [])
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided for processing.")
+        
+    if len(files) > settings.max_files_per_batch:
+        raise HTTPException(status_code=400, detail=f"Batch size exceeds limit of {settings.max_files_per_batch} files.")
+
+    def generate_steps():
+        progress_msg = ""
+        def on_progress(msg: str):
+            nonlocal progress_msg
+            progress_msg = msg
+            
+        try:
+            yield json.dumps({"type": "progress", "message": "Analyzing directory files and classifying page roles..."}) + "\n"
+            
+            res = parse_source_batch(files, progress_callback=on_progress)
+            
+            if progress_msg:
+                yield json.dumps({"type": "progress", "message": progress_msg}) + "\n"
+                
+            yield json.dumps({"type": "progress", "message": "Stitching continued questions and checking duplicates..."}) + "\n"
+            
+            yield json.dumps({
+                "type": "result",
+                "data": {
+                    "source_filename": "Batch Ingestion",
+                    "source_type": "batch",
+                    "questions": res["questions"],
+                    "statistics": res["statistics"],
+                    "warning": res.get("warning")
+                }
+            }) + "\n"
+        except Exception as e:
+            logger.error(f"Batch processing error: {e}")
+            yield json.dumps({"type": "error", "message": f"Batch processing failed: {str(e)}"}) + "\n"
+
+    return StreamingResponse(generate_steps(), media_type="application/x-ndjson")
+
 @router.post("/validate-compatibility")
 def check_compatibility(payload: dict = Body(...), db: Session = Depends(get_db)):
     template_id = payload.get("template_id")
@@ -295,9 +524,17 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
     )
 
     if not missing_fields:
-        # Nothing to fill — return current question state
+        # Nothing to fill — return current question state with already_complete status
         logger.info("AI_FILL_COMPLETE | question_id=%s | no_missing_fields", question_id)
-        return _build_question_response(q)
+        resp = _build_question_response(q)
+        resp["ai_fill_result"] = {
+            "status": "already_complete",
+            "message": "All schema metadata fields are already populated.",
+            "resolved_count": 0,
+            "unresolved_count": 0,
+            "review_required_count": 0,
+        }
+        return resp
 
     # --- 4. Make ONE focused AI call ---
     try:
@@ -328,30 +565,34 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         reason = field_result.get("reason", "")
 
         if status == "AI_INFERRED" and value and confidence >= AI_FILL_CONFIDENCE_THRESHOLD:
-            # Persist: update data and metadata
+            # Persist: update data and metadata with explicit provenance
             new_data[field_name] = str(value)
             new_metadata["fields"][field_name] = {
-                "origin": "inferred",
+                "origin": "AI_INFERRED",
+                "status": "AI_INFERRED",
+                "value": str(value),
                 "confidence": confidence,
                 "reason": reason,
             }
             resolved_fields.append(field_name)
         elif status == "AI_INFERRED" and value and confidence < AI_FILL_CONFIDENCE_THRESHOLD:
-            # Below threshold — flag for review but do NOT auto-persist
+            # Below threshold — flag for review with reason/evidence
             new_metadata["fields"][field_name] = {
-                "origin": "missing",
+                "origin": "AI_INFERRED",
+                "status": "REVIEW_REQUIRED",
                 "confidence": confidence,
-                "ai_suggestion": value,
+                "ai_suggestion": str(value),
                 "review_required": True,
-                "reason": reason,
+                "reason": reason or "Low confidence inference requiring human sign-off.",
             }
             review_required_fields.append(field_name)
         else:
-            # Truly unresolvable — leave data_json empty, update metadata
+            # Unresolvable — store explicit MISSING status and reason
             new_metadata["fields"][field_name] = {
                 "origin": "missing",
+                "status": "MISSING",
                 "confidence": 0.0,
-                "reason": reason or "Could not be safely inferred.",
+                "reason": reason or "Could not be safely inferred from source question text or context.",
             }
             unresolved_fields.append(field_name)
 
@@ -388,7 +629,27 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         len(review_required_fields),
     )
 
-    return _build_question_response(q)
+    resp = _build_question_response(q)
+    
+    # Determine overall per-question AI fill status
+    if len(resolved_fields) > 0:
+        q_fill_status = "updated"
+    elif len(review_required_fields) > 0:
+        q_fill_status = "needs_review"
+    else:
+        q_fill_status = "unable_to_infer"
+
+    resp["ai_fill_result"] = {
+        "status": q_fill_status,
+        "resolved_count": len(resolved_fields),
+        "unresolved_count": len(unresolved_fields),
+        "review_required_count": len(review_required_fields),
+        "resolved_fields": resolved_fields,
+        "review_required_fields": review_required_fields,
+        "unresolved_fields": unresolved_fields,
+    }
+
+    return resp
 
 
 
@@ -778,13 +1039,7 @@ def map_and_save(payload: dict = Body(...), db: Session = Depends(get_db)):
             source_page = mq.get("source_page")
             
             orig_q = questions[idx - 1] if idx - 1 < len(questions) else {}
-            answer_source = orig_q.get("answer_source", "EXPLICIT_ANSWER_KEY" if orig_q.get("correct_answer") else "MISSING")
-            answer_page = orig_q.get("answer_page")
-            answer_section = orig_q.get("answer_section", "Answer Key")
-            mapping_confidence = orig_q.get("mapping_confidence", 0.95 if orig_q.get("correct_answer") else 0.0)
-            mapping_status = orig_q.get("answer_mapping_status", "ANSWER_MAPPED" if orig_q.get("correct_answer") else "MISSING_ANSWER")
-            mapping_reason = orig_q.get("mapping_reason", "Extracted from source.")
-
+            
             normalized_row_data = {}
             for col in target_columns:
                 normalized_row_data[col] = str(row_data.get(col, "") or "").strip()
@@ -792,13 +1047,31 @@ def map_and_save(payload: dict = Body(...), db: Session = Depends(get_db)):
             errors = validate_question_row(normalized_row_data, schema)
             
             source_metadata = {
-                "source_page": source_page,
-                "answer_source": answer_source,
-                "answer_page": answer_page,
-                "answer_section": answer_section,
-                "mapping_confidence": mapping_confidence,
-                "answer_mapping_status": mapping_status,
-                "mapping_reason": mapping_reason,
+                "source_page": source_page or orig_q.get("source_page"),
+                "source_file": orig_q.get("source_file"),
+                "parent_source": orig_q.get("parent_source"),
+                "answer_source_file": orig_q.get("answer_source_file"),
+                "answer_source_page": orig_q.get("answer_source_page") or orig_q.get("answer_page"),
+                "answer_source_role": orig_q.get("answer_source_role") or orig_q.get("answer_section"),
+                "answer_mapping_method": orig_q.get("answer_mapping_method") or orig_q.get("answer_mapping_status"),
+                "answer_mapping_confidence": orig_q.get("answer_mapping_confidence") or orig_q.get("mapping_confidence"),
+                "source_answer_key": orig_q.get("source_answer_key"),
+                "source_answer_text": orig_q.get("source_answer_text"),
+                "ai_answer_key": orig_q.get("ai_answer_key"),
+                "ai_answer_text": orig_q.get("ai_answer_text"),
+                "final_answer_key": orig_q.get("final_answer_key"),
+                "final_answer_text": orig_q.get("final_answer_text"),
+                "source_answer_explanation": orig_q.get("source_answer_explanation"),
+                "duplicate_warnings": orig_q.get("duplicate_warnings", []),
+                "warnings": orig_q.get("warnings"),
+                
+                # Backwards compatibility keys
+                "answer_source": orig_q.get("answer_source", "EXPLICIT_ANSWER_KEY" if orig_q.get("correct_answer") else "MISSING"),
+                "answer_page": orig_q.get("answer_page"),
+                "answer_section": orig_q.get("answer_section", "Answer Key"),
+                "mapping_confidence": orig_q.get("mapping_confidence", 0.95 if orig_q.get("correct_answer") else 0.0),
+                "answer_mapping_status": orig_q.get("answer_mapping_status", "ANSWER_MAPPED" if orig_q.get("correct_answer") else "MISSING_ANSWER"),
+                "mapping_reason": orig_q.get("mapping_reason", "Extracted from source."),
                 "fields": {}
             }
             for col in target_columns:
@@ -824,6 +1097,8 @@ def map_and_save(payload: dict = Body(...), db: Session = Depends(get_db)):
 
             if ai_val.get("validation_status") == "ANSWER_CONFLICT":
                 errors.append(f"Answer Conflict: Source answer ({ai_val.get('source_answer')}) differs from AI validated answer ({ai_val.get('ai_answer')})")
+            elif ai_val.get("validation_status") == "MISSING_ANSWER":
+                errors.append("Missing Answer: No correct answer found in source. AI suggested an option.")
 
             val_status = {
                 "valid": len(errors) == 0,
@@ -994,6 +1269,27 @@ def update_question(question_id: str, payload: dict = Body(...), db: Session = D
             "confidence": 1.0
         }
         
+    answer_col = None
+    for k in payload.keys():
+        if "correct" in k.lower() or "answer" in k.lower():
+            answer_col = k
+            break
+
+    if answer_col:
+        ans_val = payload[answer_col]
+        key = str(ans_val).strip().upper()
+        if key in ("A", "B", "C", "D"):
+            new_metadata["final_answer_key"] = key
+            new_metadata["final_answer_text"] = get_option_text_by_key(new_data, key)
+        else:
+            resolved_key = get_option_key_by_text(new_data, ans_val)
+            if resolved_key:
+                new_metadata["final_answer_key"] = resolved_key
+                new_metadata["final_answer_text"] = ans_val
+            else:
+                new_metadata["final_answer_key"] = ans_val
+                new_metadata["final_answer_text"] = ans_val
+
     errors = validate_question_row(new_data, schema)
     existing_ai_val = q.validation_json.get("ai_validation") if q.validation_json else None
     
@@ -1011,22 +1307,5 @@ def update_question(question_id: str, payload: dict = Body(...), db: Session = D
     db.commit()
     db.refresh(q)
     
-    return {
-        "id": q.id,
-        "row_number": q.row_number,
-        "data_json": q.data_json,
-        "validation": q.validation_json,
-        "source_metadata": q.source_metadata_json,
-        "status": q.status,
-        "source_answer": q.validation_json.get("ai_validation", {}).get("source_answer") if q.validation_json else None,
-        "ai_answer": q.validation_json.get("ai_validation", {}).get("ai_answer") if q.validation_json else None,
-        "final_answer": q.data_json.get("Correct Answer") or q.data_json.get("correct_answer"),
-        "answer_source": q.source_metadata_json.get("answer_source") if q.source_metadata_json else "EXPLICIT_ANSWER_KEY",
-        "answer_page": q.source_metadata_json.get("answer_page") if q.source_metadata_json else None,
-        "answer_section": q.source_metadata_json.get("answer_section") if q.source_metadata_json else None,
-        "mapping_confidence": q.source_metadata_json.get("mapping_confidence") if q.source_metadata_json else 0.95,
-        "answer_mapping_status": q.source_metadata_json.get("answer_mapping_status") if q.source_metadata_json else "ANSWER_MAPPED",
-        "mapping_reason": q.source_metadata_json.get("mapping_reason") if q.source_metadata_json else None
-    }
-
+    return _build_question_response(q)
 

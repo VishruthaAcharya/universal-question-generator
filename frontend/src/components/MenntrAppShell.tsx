@@ -30,14 +30,12 @@ interface NavItemDef {
 }
 
 const NAV_ITEMS: NavItemDef[] = [
-  { key: "templates", label: "Templates", icon: <TemplateIcon size={18} />, stepNum: "01", section: "Schema & Source" },
-  { key: "source", label: "Source Files", icon: <SourceIcon size={18} />, stepNum: "02", section: "Schema & Source" },
-  { key: "selection", label: "Question Selection", icon: <SelectionIcon size={18} />, stepNum: "03", section: "Extraction & Mapping" },
-  { key: "mapping", label: "Field Mapping", icon: <MappingIcon size={18} />, stepNum: "04", section: "Extraction & Mapping" },
-  { key: "validation", label: "AI Validation", icon: <ValidationIcon size={18} />, stepNum: "05", section: "Quality & Review" },
-  { key: "review", label: "Human Review", icon: <ReviewIcon size={18} />, stepNum: "06", section: "Quality & Review" },
-  { key: "quality", label: "Quality Dashboard", icon: <QualityIcon size={18} />, stepNum: "07", section: "Quality & Review" },
-  { key: "export", label: "Final Export", icon: <ExportIcon size={18} />, stepNum: "08", section: "Publishing" },
+  { key: "templates", label: "Templates", icon: <TemplateIcon size={18} />, stepNum: "01", section: "Pipeline" },
+  { key: "source", label: "Upload Sources", icon: <SourceIcon size={18} />, stepNum: "02", section: "Pipeline" },
+  { key: "selection", label: "Questions", icon: <SelectionIcon size={18} />, stepNum: "03", section: "Pipeline" },
+  { key: "review", label: "Review", icon: <ReviewIcon size={18} />, stepNum: "04", section: "Pipeline" },
+  { key: "quality", label: "Quality Check", icon: <QualityIcon size={18} />, stepNum: "05", section: "Pipeline" },
+  { key: "export", label: "Export", icon: <ExportIcon size={18} />, stepNum: "06", section: "Pipeline" },
 ];
 
 interface MenntrAppShellProps {
@@ -103,8 +101,6 @@ export default function MenntrAppShell({
                 if (item.key === "templates" && hasSchema) isCompleted = true;
                 if (item.key === "source" && hasSource) isCompleted = true;
                 if (item.key === "selection" && totalDetected > 0) isCompleted = true;
-                if (item.key === "mapping" && hasMapped) isCompleted = true;
-                if (item.key === "validation" && hasMapped) isCompleted = true;
                 if (item.key === "review" && hasMapped && totalSelected > 0) isCompleted = true;
                 if (item.key === "quality" && hasMapped) isCompleted = true;
 

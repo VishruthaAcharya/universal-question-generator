@@ -1,0 +1,33 @@
+{
+  "version": "v3_validation",
+  "hash": "1667363cbddd36f627b1c046e246861be65b2a08459e874336a186d565b6ccba",
+  "result": {
+    "question_id": "q1",
+    "row_number": 1,
+    "ai_answer": "C",
+    "ai_answer_text": "Canberra",
+    "source_answer": "C",
+    "source_answer_text": "Canberra",
+    "answer_match": true,
+    "confidence": 0.9,
+    "confidence_level": "MEDIUM",
+    "validation_status": "AI_VALIDATED",
+    "validation_methods": [
+      "INDEPENDENT_AI_SOLVER",
+      "AI_BLIND_CRITIC_AGREED"
+    ],
+    "review_required": false,
+    "review_priority": 5,
+    "reason": "Canberra is the official capital city of Australia, while Sydney, Melbourne, and Brisbane are major cities but not the capital.",
+    "subject": "General",
+    "signals": {
+      "solver_agreed": true,
+      "critic_agreed": true,
+      "deterministic_verified": false,
+      "extraction_confidence": 0.95,
+      "option_count": 4,
+      "defects_detected": [],
+      "vote_agreement_ratio": null
+    }
+  }
+}

@@ -16,7 +16,7 @@ HORIZONTAL_OPTIONS_PATTERN = re.compile(
 
 # Inline answer patterns: "Ans: (b)", "Answer: B", "Correct Option: C", "Key: A"
 INLINE_ANSWER_PATTERN = re.compile(
-    r"(?:(?:Correct\s+)?Answer|Ans|Correct\s+Option|Key)\s*[\:\-\.]*\s*(?:Option\s*)?\(?([A-Da-d1-4]|True|False|[^\n\r]+?)\)?(?:\s*$|\s+(?=(?:Topic|Difficulty|Explanation|Bloom|Mark)))",
+    r"(?:^|[\n\r]|\s{2,})\s*(?:(?:Correct\s+)?Answer|Ans|Correct\s+Option|Key)\s*[\:\-\.]+\s*(?:Option\s*)?\(?([A-Da-d1-4]|True|False|[^\n\r]+?)\)?(?:\s*$|\s+(?=(?:Question\s+Topic|Topic|Difficulty|Explanation|Bloom|Mark|Domain)))",
     re.IGNORECASE | re.MULTILINE
 )
 
@@ -49,7 +49,77 @@ def extract_options_and_stem(text: str) -> tuple[str, list[str], str | None, dic
     else:
         text_before_ans = clean_text
 
-    # 2. Try Horizontal Regex Split
+    # 2. Try Line-by-Line Option Extraction FIRST
+    lines = text_before_ans.splitlines()
+    stem_lines = []
+    options_list = []
+    options_dict = {}
+    in_options = False
+    current_label = None
+
+    line_opt_pat = re.compile(r"^\s*(?:\(([A-Da-d1-4])\)|([A-Da-d1-4])[\.\)\:\-]|\b([A-Da-d1-4])\b\s*[\:\-])\s*(.*)$")
+
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+
+        # Skip page footers or metadata tags that may appear before/after options
+        if re.match(r"^Page\s+\d+(?:\s+(?:of|\/)\s+\d+)?$", trimmed, re.IGNORECASE):
+            continue
+        if re.match(r"^Domain\s*[\:\-\.]*\s*", trimmed, re.IGNORECASE):
+            continue
+
+        m = line_opt_pat.match(trimmed)
+        if m:
+            in_options = True
+            raw_label = m.group(1) or m.group(2) or m.group(3)
+            current_label = raw_label.upper() if raw_label else chr(65 + len(options_list))
+            if current_label.isdigit():
+                idx_num = int(current_label) - 1
+                if 0 <= idx_num < 4:
+                    current_label = chr(65 + idx_num)
+
+            opt_content = m.group(4).strip()
+            # Check if this line also contains subsequent options on same line (e.g. "(a) opt1 (b) opt2")
+            sub_matches = list(OPTION_DELIM_PATTERN.finditer(opt_content))
+            if sub_matches:
+                # Split multiple options on the same line
+                opt_1 = normalize_math_and_greek_symbols(opt_content[:sub_matches[0].start()].strip())
+                if opt_1:
+                    options_list.append(opt_1)
+                    options_dict[current_label] = opt_1
+                for si, s_match in enumerate(sub_matches):
+                    s_lbl = (s_match.group(1) or s_match.group(2) or s_match.group(3) or "B").upper()
+                    if s_lbl.isdigit():
+                        s_idx = int(s_lbl) - 1
+                        if 0 <= s_idx < 4:
+                            s_lbl = chr(65 + s_idx)
+                    s_start = s_match.end()
+                    s_end = sub_matches[si + 1].start() if si + 1 < len(sub_matches) else len(opt_content)
+                    s_text = normalize_math_and_greek_symbols(opt_content[s_start:s_end].strip())
+                    if s_text:
+                        options_list.append(s_text)
+                        options_dict[s_lbl] = s_text
+            else:
+                opt_val = normalize_math_and_greek_symbols(opt_content)
+                options_list.append(opt_val)
+                options_dict[current_label] = opt_val
+        elif in_options:
+            # Multi-line continuation of current option
+            if options_list:
+                cleaned_tail = normalize_math_and_greek_symbols(trimmed)
+                options_list[-1] += " " + cleaned_tail
+                if current_label and current_label in options_dict:
+                    options_dict[current_label] += " " + cleaned_tail
+        else:
+            stem_lines.append(trimmed)
+
+    if len(options_list) >= 2:
+        stem_norm = normalize_math_and_greek_symbols(" ".join(stem_lines).strip())
+        return stem_norm, options_list, inline_ans, options_dict
+
+    # 3. Fallback: Horizontal Regex Split
     # Find all option delimiter positions
     matches = list(OPTION_DELIM_PATTERN.finditer(text_before_ans))
     
@@ -74,71 +144,12 @@ def extract_options_and_stem(text: str) -> tuple[str, list[str], str | None, dic
             # Clean any trailing answer marker in option body
             opt_body = INLINE_ANSWER_PATTERN.sub("", opt_body).strip()
             opt_body_norm = normalize_math_and_greek_symbols(opt_body)
-            if opt_body_norm:
+            if opt_body_norm and opt_body_norm.upper() not in ["A", "B", "C", "D"]:
                 options_list.append(opt_body_norm)
                 options_dict[label_norm] = opt_body_norm
 
         if len(options_list) >= 2:
             return stem, options_list, inline_ans, options_dict
-
-    # 3. Fallback: Line-by-Line Option Extraction
-    lines = text_before_ans.splitlines()
-    stem_lines = []
-    options_list = []
-    options_dict = {}
-    in_options = False
-    current_label = None
-
-    line_opt_pat = re.compile(r"^\s*(?:\(([A-Da-d1-4])\)|([A-Da-d1-4])[\.\)\:\-]|\b([A-Da-d1-4])\b\s*[\:\-])\s*(.*)$")
-
-    for line in lines:
-        trimmed = line.strip()
-        if not trimmed:
-            continue
-
-        m = line_opt_pat.match(trimmed)
-        if m:
-            in_options = True
-            raw_label = m.group(1) or m.group(2) or m.group(3)
-            current_label = raw_label.upper() if raw_label else chr(65 + len(options_list))
-            if current_label.isdigit():
-                idx_num = int(current_label) - 1
-                if 0 <= idx_num < 4:
-                    current_label = chr(65 + idx_num)
-
-            opt_content = m.group(4).strip()
-            # Check if this line also contains subsequent options on same line (e.g. "(a) opt1 (b) opt2")
-            sub_matches = list(OPTION_DELIM_PATTERN.finditer(opt_content))
-            if sub_matches:
-                # Split multiple options on the same line
-                opt_1 = normalize_math_and_greek_symbols(opt_content[:sub_matches[0].start()].strip())
-                options_list.append(opt_1)
-                options_dict[current_label] = opt_1
-                for si, s_match in enumerate(sub_matches):
-                    s_lbl = (s_match.group(1) or s_match.group(2) or s_match.group(3) or "B").upper()
-                    s_start = s_match.end()
-                    s_end = sub_matches[si + 1].start() if si + 1 < len(sub_matches) else len(opt_content)
-                    s_text = normalize_math_and_greek_symbols(opt_content[s_start:s_end].strip())
-                    if s_text:
-                        options_list.append(s_text)
-                        options_dict[s_lbl] = s_text
-            else:
-                opt_val = normalize_math_and_greek_symbols(opt_content)
-                options_list.append(opt_val)
-                options_dict[current_label] = opt_val
-        elif in_options:
-            # Multi-line continuation of current option
-            if options_list:
-                cleaned_tail = normalize_math_and_greek_symbols(trimmed)
-                options_list[-1] += " " + cleaned_tail
-                if current_label and current_label in options_dict:
-                    options_dict[current_label] += " " + cleaned_tail
-        else:
-            stem_lines.append(trimmed)
-
-    if len(options_list) >= 2:
-        stem_norm = normalize_math_and_greek_symbols(" ".join(stem_lines).strip())
-        return stem_norm, options_list, inline_ans, options_dict
 
     clean_norm = normalize_math_and_greek_symbols(clean_text)
     return clean_norm, [], inline_ans, {}
