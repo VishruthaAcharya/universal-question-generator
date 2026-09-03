@@ -212,17 +212,17 @@ def test_validate_disagreement_triggers_self_consistency():
         "Correct Answer": "B"
     }
     # Solver says B, Blind pass says A (Disagreement), Self-consistency voting gives B with 2/3 (0.67) ratio
-    with patch("app.services.ai_solver.solve_question_independently", return_value={
+    with patch("app.services.answer_validation_engine.solve_question_independently", return_value={
         "selected_option_letter": "B",
         "selected_option_text": "Hydrogen",
         "reasoning_summary": "Zn + H2SO4 -> ZnSO4 + H2.",
         "is_solvable": True
-    }), patch("app.services.ai_solver.solve_question_blind_second_pass", return_value={
+    }), patch("app.services.answer_validation_engine.solve_question_blind_second_pass", return_value={
         "selected_option_letter": "A",
         "selected_option_text": "Oxygen",
         "reasoning_summary": "Oxygen test.",
         "is_solvable": True
-    }), patch("app.services.ai_solver.solve_question_with_self_consistency", return_value={
+    }), patch("app.services.answer_validation_engine.solve_question_with_self_consistency", return_value={
         "selected_option_letter": "B",
         "selected_option_text": "Hydrogen",
         "reasoning_summary": "Majority vote (2/3) confirmed Hydrogen gas.",

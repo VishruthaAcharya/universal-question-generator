@@ -243,6 +243,34 @@ export async function aiFillQuestionFields(
   return data as QuestionRow;
 }
 
+/**
+ * ONE-CLICK complete missing-field resolution for multiple questions (Bulk / Universal AI Fill).
+ */
+export async function batchAiFillQuestionFields(
+  questionIds: string[],
+  context: Record<string, any>
+): Promise<{
+  summary: {
+    questions_processed: number;
+    fields_filled: number;
+    already_populated: number;
+    needs_review: number;
+    failed: number;
+  };
+  questions: QuestionRow[];
+}> {
+  const res = await fetch(`${API}/api/questions/batch-ai-fill`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question_ids: questionIds, context }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || "Batch AI fill failed");
+  }
+  return data;
+}
+
 
 export async function mapQuestions(
   templateId: string,

@@ -158,34 +158,108 @@ Format:
         logger.error(f"AI assisted matching fallback failed: {e}")
         return {}
 
+def normalize_group_key(val: str | None) -> str:
+    """Normalizes section/chapter/image/file headers to extract canonical group identity."""
+    if not val:
+        return ""
+    s = str(val).strip().lower()
+    s = re.sub(r"\.[a-zA-Z0-9]+$", "", s)
+    s = re.sub(r"^(?:question[\s_\-]*)?(?:image|img|file|page|section|part|chapter|test|set|paper|group)[\s_\-]*", "group_", s)
+    m = re.search(r"(?:group_|#|\b)([a-z0-9]+)\b", s)
+    if m:
+        return m.group(1).lower()
+    return re.sub(r"[^a-z0-9]", "", s)
+
+def are_groups_compatible(q_group: str | None, a_group: str | None, q_file: str | None = None, a_file: str | None = None) -> bool:
+    """
+    Checks if a question group/file is compatible with an answer key group/file.
+    Returns True if either group is unspecified or if they share group tokens/numbers.
+    """
+    if not q_group and not q_file and not a_group:
+        return True
+
+    q_keys = set()
+    for item in (q_group, q_file):
+        if item:
+            clean = str(item).strip().lower()
+            q_keys.add(clean)
+            q_keys.add(re.sub(r"[^a-z0-9]", "", clean))
+            norm = normalize_group_key(clean)
+            if norm:
+                q_keys.add(norm)
+            nums = re.findall(r"\d+", clean)
+            for n in nums:
+                q_keys.add(n)
+                q_keys.add(f"image{n}")
+                q_keys.add(f"image_{n}")
+                q_keys.add(f"image {n}")
+
+    a_keys = set()
+    for item in (a_group, a_file):
+        if item:
+            clean = str(item).strip().lower()
+            a_keys.add(clean)
+            a_keys.add(re.sub(r"[^a-z0-9]", "", clean))
+            norm = normalize_group_key(clean)
+            if norm:
+                a_keys.add(norm)
+            nums = re.findall(r"\d+", clean)
+            for n in nums:
+                a_keys.add(n)
+                a_keys.add(f"image{n}")
+                a_keys.add(f"image_{n}")
+                a_keys.add(f"image {n}")
+
+    if not q_keys or not a_keys:
+        return True
+
+    if q_keys.intersection(a_keys):
+        return True
+
+    for qk in q_keys:
+        for ak in a_keys:
+            if len(qk) >= 2 and len(ak) >= 2 and (qk in ak or ak in qk):
+                return True
+
+    return False
+
 def reconcile_questions_and_answers(
     questions: list[dict[str, Any]],
     answers: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """
     Core reconciliation routine that maps questions to answers using a multi-stage process:
-    Stage 1: Explicit question number matches explicit answer number (with Section/Chapter/File checks).
-    Stage 2: Sequential Ordering (if safe: no numbering gaps, counts match).
-    Stage 3: Semantic option matching.
+    Stage 1: Explicit question number matches explicit answer number (with Section/Chapter/Image Group checks).
+    Stage 2: Sequential Ordering (if safe: within same group, no numbering gaps, counts match).
+    Stage 3: Semantic option matching (within compatible group).
     Stage 4: AI-assisted matching fallback.
     
     Mutates questions in-place to populate:
+    - question_source_image / question_group
+    - answer_source_image / answer_key_group
+    - question_number
     - source_answer_key / source_answer_text
     - final_answer_key / final_answer_text
-    - answer_mapping_method
-    - answer_mapping_confidence
+    - mapping_method / mapping_confidence / answer_mapping_score
     - validation_status / review_required / warnings
     """
     if not questions:
         return []
 
-    # Initialize reconciliation fields
+    # Initialize reconciliation and provenance fields
     for q in questions:
+        q_file = q.get("source_file") or q.get("question_source_image") or ""
+        q["question_source_image"] = q_file
+        q["question_group"] = q.get("question_group") or q_file
+        q["answer_source_image"] = None
+        q["answer_key_group"] = None
         q["source_answer_key"] = None
         q["source_answer_text"] = None
         q["source_answer_explanation"] = None
         q["answer_mapping_method"] = "UNRESOLVED"
         q["answer_mapping_confidence"] = "LOW"
+        q["mapping_method"] = "UNRESOLVED"
+        q["mapping_confidence"] = "LOW"
         q["answer_mapping_score"] = 0.0
         q["duplicate_warnings"] = []
         
@@ -213,18 +287,18 @@ def reconcile_questions_and_answers(
                 return chr(65 + idx)
         # Check substring match
         for idx, opt in enumerate(options):
-            if val_clean in str(opt).strip().lower() or str(opt).strip().lower() in val_clean:
+            if len(val_clean) >= 2 and (val_clean in str(opt).strip().lower() or str(opt).strip().lower() in val_clean):
                 return chr(65 + idx)
         return None
 
-    # STAGE 1: Explicit question number matching (Q1 -> Answer 1)
+    # STAGE 1: Explicit question number matching with group awareness (Q1 -> Answer 1)
     for q in list(unmatched_questions):
         q_num = q.get("question_number")
         if q_num is None:
             continue
 
-        q_file = q.get("source_file")
-        q_chap = str(q.get("source_chapter") or q.get("topic") or "").lower().strip()
+        q_file = q.get("source_file") or q.get("question_source_image")
+        q_chap = str(q.get("source_chapter") or q.get("topic") or q.get("question_group") or "").lower().strip()
 
         # Find answer candidates
         candidates = []
@@ -236,99 +310,104 @@ def reconcile_questions_and_answers(
             if a_num is not None and str(a_num) == str(q_num):
                 candidates.append((idx, a))
 
+        if not candidates:
+            continue
+
+        best_match = None
         if len(candidates) == 1:
             idx, a = candidates[0]
+            a_group = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+            if not a_group or are_groups_compatible(q_chap, a_group, q_file, a.get("source_file")):
+                best_match = (idx, a, "EXPLICIT")
+            else:
+                best_match = None
+        else:
+            # Multiple candidates with same question number — filter by group compatibility
+            compatible_candidates = []
+            for idx, a in candidates:
+                a_group = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+                if are_groups_compatible(q_chap, a_group, q_file, a.get("source_file")):
+                    compatible_candidates.append((idx, a))
+                elif q_file and a.get("source_file") and q_file == a.get("source_file"):
+                    compatible_candidates.append((idx, a))
+
+            if len(compatible_candidates) == 1:
+                idx, a = compatible_candidates[0]
+                best_match = (idx, a, "EXPLICIT_GROUPED")
+            elif len(compatible_candidates) > 1:
+                best_match = None
+            else:
+                best_match = None
+
+        if best_match:
+            idx, a, method = best_match
             ans_val = a.get("answer")
             options = q.get("options", [])
             opt_letter = get_option_letter_for_text(options, ans_val)
             
             q["source_answer_key"] = opt_letter or ans_val
-            q["source_answer_text"] = ans_val if opt_letter else None
+            q["source_answer_text"] = ans_val if opt_letter else (ans_val or "")
+            q["correct_answer"] = ans_val if opt_letter else (ans_val or "")
             q["source_answer_explanation"] = a.get("explanation")
-            q["answer_mapping_method"] = "EXPLICIT"
+            q["question_source_image"] = q_file
+            q["question_group"] = q.get("question_group") or q_file
+            q["answer_source_image"] = a.get("source_file")
+            q["answer_key_group"] = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+            q["mapping_method"] = method
+            q["mapping_confidence"] = "HIGH"
+            q["answer_mapping_method"] = method
             q["answer_mapping_confidence"] = "HIGH"
-            q["answer_mapping_score"] = 0.98
+            q["answer_mapping_score"] = 0.98 if method == "EXPLICIT" else 0.95
             q["answer_source_file"] = a.get("source_file")
             q["answer_source_page"] = a.get("source_page")
             q["answer_source_role"] = a.get("source_role", "ANSWER_SOURCE")
             
             matched_answer_indices.add(idx)
             unmatched_questions.remove(q)
-            
-        elif len(candidates) > 1:
-            # Disambiguate using Chapter, Section, or File matching
-            best_match = None
-            for idx, a in candidates:
-                a_chap = str(a.get("source_chapter") or "").lower().strip()
-                a_file = a.get("source_file")
-                
-                # Check for chapter alignment
-                if q_chap and a_chap and (q_chap in a_chap or a_chap in q_chap):
-                    best_match = (idx, a)
-                    break
-                # Check for parent file alignment
-                if q_file and a_file and q_file == a_file:
-                    best_match = (idx, a)
-                    break
-
-            if best_match:
-                idx, a = best_match
-                ans_val = a.get("answer")
-                options = q.get("options", [])
-                opt_letter = get_option_letter_for_text(options, ans_val)
-                
-                q["source_answer_key"] = opt_letter or ans_val
-                q["source_answer_text"] = ans_val if opt_letter else None
-                q["source_answer_explanation"] = a.get("explanation")
-                q["answer_mapping_method"] = "EXPLICIT_DISAMBIGUATED"
-                q["answer_mapping_confidence"] = "HIGH"
-                q["answer_mapping_score"] = 0.95
-                q["answer_source_file"] = a.get("source_file")
-                q["answer_source_page"] = a.get("source_page")
-                q["answer_source_role"] = a.get("source_role", "ANSWER_SOURCE")
-                
-                matched_answer_indices.add(idx)
-                unmatched_questions.remove(q)
-            else:
-                # Ambiguous repeated numbers
-                idx, a = candidates[0] # Default to first but flag it
-                ans_val = a.get("answer")
-                options = q.get("options", [])
-                opt_letter = get_option_letter_for_text(options, ans_val)
-                
-                q["source_answer_key"] = opt_letter or ans_val
-                q["source_answer_text"] = ans_val if opt_letter else None
-                q["source_answer_explanation"] = a.get("explanation")
+        else:
+            if len(candidates) > 1:
+                q["source_answer_key"] = None
+                q["source_answer_text"] = None
+                q["question_source_image"] = q_file
+                q["question_group"] = q.get("question_group") or q_file
                 q["answer_mapping_method"] = "AMBIGUOUS"
                 q["answer_mapping_confidence"] = "LOW"
-                q["answer_mapping_score"] = 0.50
+                q["answer_mapping_score"] = 0.0
+                q["mapping_method"] = "AMBIGUOUS"
+                q["mapping_confidence"] = "LOW"
                 q["validation_status"] = "AMBIGUOUS"
                 q["review_required"] = True
-                q["warnings"] = f"Multiple matching answers found for question #{q_num}."
-                
-                # Do NOT add to matched indices so human can reconcile
+                q["warnings"] = f"Multiple conflicting answers found for question #{q_num} across groups."
+                unmatched_questions.remove(q)
 
-    # STAGE 2: Sequential Matching (Only if evidence is strong: counts match exactly and no duplicate numbers)
-    # Check if number of unmatched questions matches number of unmatched answers, and they have sequential ordering
+    # STAGE 2: Sequential Matching (Only if evidence is strong: single group, counts match exactly, no duplicate numbers)
     remaining_ans = [(idx, a) for idx, a in enumerate(answers) if idx not in matched_answer_indices]
     if len(unmatched_questions) == len(remaining_ans) and len(unmatched_questions) > 0:
-        # Check that there are no numbering conflicts (e.g. out of order numbers)
-        q_nums = [q.get("question_number") for q in unmatched_questions]
-        a_nums = [a.get("question_number") for idx, a in remaining_ans]
+        q_groups = set(normalize_group_key(q.get("source_file") or q.get("question_group")) for q in unmatched_questions)
+        a_groups = set(normalize_group_key(a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")) for idx, a in remaining_ans)
         
+        q_nums = [q.get("question_number") for q in unmatched_questions]
         has_number_duplicates = len(set(n for n in q_nums if n is not None)) < len([n for n in q_nums if n is not None])
         
-        if not has_number_duplicates:
-            # Safe to map sequentially
+        # Only allow sequential matching when no group conflicts and no duplicate numbers exist
+        if not has_number_duplicates and len(q_groups) <= 1 and len(a_groups) <= 1 and (not q_groups or not a_groups or q_groups == a_groups):
             for idx_q, q in enumerate(list(unmatched_questions)):
                 idx_a, a = remaining_ans[idx_q]
                 ans_val = a.get("answer")
                 options = q.get("options", [])
                 opt_letter = get_option_letter_for_text(options, ans_val)
                 
+                q_file = q.get("source_file") or q.get("question_source_image")
                 q["source_answer_key"] = opt_letter or ans_val
-                q["source_answer_text"] = ans_val if opt_letter else None
+                q["source_answer_text"] = ans_val if opt_letter else (ans_val or "")
+                q["correct_answer"] = ans_val if opt_letter else (ans_val or "")
                 q["source_answer_explanation"] = a.get("explanation")
+                q["question_source_image"] = q_file
+                q["question_group"] = q.get("question_group") or q_file
+                q["answer_source_image"] = a.get("source_file")
+                q["answer_key_group"] = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+                q["mapping_method"] = "SEQUENTIAL"
+                q["mapping_confidence"] = "MEDIUM"
                 q["answer_mapping_method"] = "SEQUENTIAL"
                 q["answer_mapping_confidence"] = "MEDIUM"
                 q["answer_mapping_score"] = 0.84
@@ -339,12 +418,15 @@ def reconcile_questions_and_answers(
                 matched_answer_indices.add(idx_a)
                 unmatched_questions.remove(q)
 
-    # STAGE 3: Semantic Option Matching (Answer matches one option text, numbering is missing/unmatched)
+    # STAGE 3: Semantic Option Matching (Answer matches one option text within compatible group)
     for q in list(unmatched_questions):
         options = q.get("options", [])
         if not options:
             continue
             
+        q_file = q.get("source_file") or q.get("question_source_image")
+        q_chap = str(q.get("source_chapter") or q.get("topic") or q.get("question_group") or "").lower().strip()
+
         semantic_matches = []
         for idx, a in enumerate(answers):
             if idx in matched_answer_indices:
@@ -353,13 +435,23 @@ def reconcile_questions_and_answers(
             ans_val = str(a.get("answer", "")).strip()
             opt_letter = get_option_letter_for_text(options, ans_val)
             if opt_letter:
-                semantic_matches.append((idx, a, opt_letter))
+                a_group = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+                if not a_group or are_groups_compatible(q_chap, a_group, q_file, a.get("source_file")):
+                    semantic_matches.append((idx, a, opt_letter))
 
         if len(semantic_matches) == 1:
             idx_a, a, opt_letter = semantic_matches[0]
+            ans_val = a.get("answer")
             q["source_answer_key"] = opt_letter
-            q["source_answer_text"] = a.get("answer")
+            q["source_answer_text"] = ans_val
+            q["correct_answer"] = ans_val
             q["source_answer_explanation"] = a.get("explanation")
+            q["question_source_image"] = q_file
+            q["question_group"] = q.get("question_group") or q_file
+            q["answer_source_image"] = a.get("source_file")
+            q["answer_key_group"] = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+            q["mapping_method"] = "SEMANTIC"
+            q["mapping_confidence"] = "LOW"
             q["answer_mapping_method"] = "SEMANTIC"
             q["answer_mapping_confidence"] = "LOW"
             q["answer_mapping_score"] = 0.72
@@ -379,16 +471,23 @@ def reconcile_questions_and_answers(
                 q_id = q.get("question_id")
                 if q_id in ai_mappings:
                     a = ai_mappings[q_id]
-                    # Find index in full answers
                     idx_a = next((i for i, ans in enumerate(answers) if ans == a), None)
                     if idx_a is not None and idx_a not in matched_answer_indices:
                         ans_val = a.get("answer")
                         options = q.get("options", [])
                         opt_letter = get_option_letter_for_text(options, ans_val)
                         
+                        q_file = q.get("source_file") or q.get("question_source_image")
                         q["source_answer_key"] = opt_letter or ans_val
-                        q["source_answer_text"] = ans_val if opt_letter else None
+                        q["source_answer_text"] = ans_val if opt_letter else (ans_val or "")
+                        q["correct_answer"] = ans_val if opt_letter else (ans_val or "")
                         q["source_answer_explanation"] = a.get("explanation")
+                        q["question_source_image"] = q_file
+                        q["question_group"] = q.get("question_group") or q_file
+                        q["answer_source_image"] = a.get("source_file")
+                        q["answer_key_group"] = a.get("answer_key_group") or a.get("source_chapter") or a.get("source_section")
+                        q["mapping_method"] = "AI_FALLBACK"
+                        q["mapping_confidence"] = "LOW"
                         q["answer_mapping_method"] = "AI_FALLBACK"
                         q["answer_mapping_confidence"] = "LOW"
                         q["answer_mapping_score"] = 0.70
@@ -401,17 +500,29 @@ def reconcile_questions_and_answers(
 
     # Post-process unresolved answer mappings
     for q in unmatched_questions:
-        # Check if there is an inline correct_answer extracted from page parser
+        q_file = q.get("source_file") or q.get("question_source_image")
+        q["question_source_image"] = q_file
+        q["question_group"] = q.get("question_group") or q_file
+        
         inline_ans = q.get("correct_answer")
-        if inline_ans and str(inline_ans).strip():
+        if inline_ans and str(inline_ans).strip() and not q.get("source_answer_key"):
             options = q.get("options", [])
             opt_letter = get_option_letter_for_text(options, inline_ans)
             q["source_answer_key"] = opt_letter or inline_ans
-            q["source_answer_text"] = inline_ans if opt_letter else None
+            q["source_answer_text"] = inline_ans if opt_letter else (inline_ans or "")
+            q["mapping_method"] = "INLINE"
+            q["mapping_confidence"] = "HIGH"
             q["answer_mapping_method"] = "INLINE"
             q["answer_mapping_confidence"] = "HIGH"
             q["answer_mapping_score"] = 0.95
-        else:
+        elif not q.get("source_answer_key"):
+            q["source_answer_key"] = None
+            q["source_answer_text"] = None
+            q["mapping_method"] = "UNRESOLVED"
+            q["mapping_confidence"] = "LOW"
+            q["answer_mapping_method"] = "UNRESOLVED"
+            q["answer_mapping_confidence"] = "LOW"
+            q["answer_mapping_score"] = 0.0
             q["validation_status"] = "REVIEW_REQUIRED"
             q["review_required"] = True
             q["warnings"] = "Answer could not be reliably matched."
@@ -422,14 +533,12 @@ def reconcile_questions_and_answers(
         if options and len(options) >= 2:
             unique_opts = set(str(o).strip().lower() for o in options if o is not None)
             if len(unique_opts) < len(options):
-                # Duplicate values detected! E.g. Option A = 6%, Option D = 6%
                 q["validation_status"] = "AMBIGUOUS"
                 q["review_required"] = True
                 q["warnings"] = "Duplicate MCQ option values detected."
 
     # Default final_answers
     for q in questions:
-        # Default final answer to source answer key if available
         q["final_answer_key"] = q["source_answer_key"]
         q["final_answer_text"] = q["source_answer_text"]
 

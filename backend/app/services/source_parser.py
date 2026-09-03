@@ -426,6 +426,7 @@ def parse_source_batch(
                 "source_file": s_name,
                 "page_number": p_num,
                 "content": content,
+                "df": page.get("df"),
                 "type": p_type,
                 "has_visual": page.get("has_visual", False),
                 "role": classification["role"],
@@ -462,7 +463,7 @@ def parse_source_batch(
 
         # Parse questions
         if role in ("QUESTION_SOURCE", "MIXED_SOURCE", "UNKNOWN_SOURCE"):
-            if p_type == "dataframe" and "df" in unit:
+            if p_type == "dataframe" and "df" in unit and unit["df"] is not None:
                 df_qs = extract_questions_from_dataframe(unit["df"], p_num)
                 for q in df_qs:
                     q["source_file"] = s_name

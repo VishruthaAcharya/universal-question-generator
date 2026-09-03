@@ -59,16 +59,16 @@ def validate_question_row(q: dict[str, Any], template_schema: dict[str, Any]) ->
     # Extract values mapped by either original or normalized names
     data = {}
     for col in columns:
-        orig = col["original_name"]
-        norm = col["normalized_name"]
+        orig = col.get("original_name", "")
+        norm = col.get("normalized_name") or normalize_field_name(orig)
         val = q.get(orig, q.get(norm, ""))
         data[norm] = str(val).strip() if val is not None else ""
 
     # 1. Required fields
     for col in columns:
-        orig = col["original_name"]
-        norm = col["normalized_name"]
-        is_required = col["required"]
+        orig = col.get("original_name", "")
+        norm = col.get("normalized_name") or normalize_field_name(orig)
+        is_required = col.get("required", False)
         if is_required and not data.get(norm):
             errors.append(f"Required field '{orig}' is missing or empty.")
 

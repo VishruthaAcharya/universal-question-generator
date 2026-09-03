@@ -1,5 +1,5 @@
 {
-  "version": "v5",
+  "version": "v6",
   "file_hash": "74353cc836ab116745cf94014568f5181e5837f67a695d2649024fd43da06a40",
   "questions": [
     {
@@ -68,7 +68,7 @@
           }
         ],
         "average_extraction_confidence": 0.95,
-        "extraction_time_ms": 41.0
+        "extraction_time_ms": 10.2
       }
     }
   ],
@@ -93,6 +93,6 @@
       }
     ],
     "average_extraction_confidence": 0.95,
-    "extraction_time_ms": 41.0
+    "extraction_time_ms": 10.2
   }
 }

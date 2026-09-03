@@ -438,8 +438,34 @@ Return ONLY this JSON structure (no other text):
                 # Normalize value: treat empty string, "null", "undefined" as None
                 if value is not None:
                     value = str(value).strip()
-                    if value.lower() in ("null", "undefined", "none", ""):
+                    if value.lower() in ("null", "undefined", "none", "", "n/a", "na", "-", "--", "unresolved", "[unresolved]"):
                         value = None
+
+                # Specific field validations
+                norm_name = field_name.lower().strip()
+                if value is not None:
+                    # Difficulty validation
+                    if norm_name in ("difficulty", "difficulty level", "diff", "level"):
+                        uval = value.upper()
+                        if uval in ("EASY", "MEDIUM", "HARD"):
+                            value = value.capitalize()
+                        elif "easy" in norm_name or "easy" in value.lower():
+                            value = "Easy"
+                        elif "hard" in norm_name or "hard" in value.lower():
+                            value = "Hard"
+                        elif "med" in value.lower():
+                            value = "Medium"
+                        else:
+                            value = value.capitalize()
+                    # Numeric fields validation (e.g. marks, score)
+                    elif norm_name in ("marks", "score", "points", "mark", "weightage"):
+                        import re
+                        m = re.search(r"\d+(?:\.\d+)?", str(value))
+                        if m:
+                            value = m.group(0)
+                        else:
+                            status = "UNRESOLVED"
+                            confidence = min(confidence, 0.4)
 
                 # If value is None, force UNRESOLVED
                 if value is None:

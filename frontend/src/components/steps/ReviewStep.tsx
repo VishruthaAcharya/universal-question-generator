@@ -7,7 +7,7 @@ import type {
   NormalizedQuestionSuggestion,
   NormalizedFieldSuggestion,
 } from "../../types";
-import { aiFillMissingFields, aiFillQuestionFields, updateQuestion } from "../../lib/api";
+import { aiFillMissingFields, aiFillQuestionFields, batchAiFillQuestionFields, updateQuestion } from "../../lib/api";
 import ReviewTable from "../ReviewTable";
 import AlertPanel from "../AlertPanel";
 import {
@@ -252,50 +252,40 @@ export default function ReviewStep({
   const optBKey = findColumnKey(/option.*b|choice.*b|answer.*2/i, "Option B");
   const optCKey = findColumnKey(/option.*c|choice.*c|answer.*3/i, "Option C");
   const optDKey = findColumnKey(/option.*d|choice.*d|answer.*4/i, "Option D");
-  const answerKey = findColumnKey(/answer|correct/i, "Correct Answer");
+
+  const findCorrectAnswerColumn = (): string => {
+    // 1. Explicit high-priority matches for correct answer
+    const explicit = columns.find((c) =>
+      /^(?:correct[\s_-]*(?:answer|option|choice)|answer[\s_-]*key|solution)$/i.test(c.trim())
+    );
+    if (explicit) return explicit;
+
+    // 2. Standalone "Answer" or "Key" (NOT "Answer 1", "Answer A", etc.)
+    const standalone = columns.find((c) =>
+      /^(?:answer|key|correct)$/i.test(c.trim())
+    );
+    if (standalone) return standalone;
+
+    // 3. Any column containing "correct" that is NOT an option
+    const anyCorrect = columns.find((c) =>
+      /correct/i.test(c) && !/(?:option|choice|answer[\s_-]*[1-4a-d])/i.test(c)
+    );
+    if (anyCorrect) return anyCorrect;
+
+    // 4. Any column containing "answer" that is NOT an option (e.g. not "Answer 1", "answer_1", "answer a")
+    const nonOptionAnswer = columns.find((c) =>
+      /answer/i.test(c) && !/answer[\s_\-\.]*[1-4a-d]/i.test(c)
+    );
+    if (nonOptionAnswer) return nonOptionAnswer;
+
+    // 5. Default fallback
+    return columns.find((c) => c.toLowerCase() === "correct answer") || "Correct Answer";
+  };
+
+  const answerKey = findCorrectAnswerColumn();
   const difficultyKey = findColumnKey(/difficulty|level/i, "Difficulty");
   const topicKey = findColumnKey(/topic|chapter/i, "Topic");
   const bloomsKey = findColumnKey(/bloom/i, "Bloom's Taxonomy");
-
-  // Distinct Answer Provenance & Decision State
-  const sourceAnswerVal = (
-    currentQuestion?.source_answer ||
-    currentQuestion?.source_metadata?.answer_source ||
-    ""
-  ).trim();
-
-  const aiAnswerVal = (
-    currentQuestion?.ai_answer ||
-    currentQuestion?.validation?.ai_validation?.ai_answer ||
-    ""
-  ).trim();
-
-  const finalAnswerVal = (
-    currentQuestion?.final_answer ||
-    currentQuestion?.data_json?.[answerKey] ||
-    sourceAnswerVal ||
-    aiAnswerVal ||
-    ""
-  ).trim();
-
-  const aiConfidenceVal =
-    typeof currentQuestion?.validation?.ai_validation?.confidence === "number"
-      ? currentQuestion.validation.ai_validation.confidence
-      : 0.98;
-
-  const isAnswerConflict = Boolean(
-    sourceAnswerVal &&
-    aiAnswerVal &&
-    sourceAnswerVal.toUpperCase() !== aiAnswerVal.toUpperCase()
-  );
-
-  const isMissingSource = !sourceAnswerVal;
-
-  const isMatchesSource = Boolean(
-    sourceAnswerVal &&
-    aiAnswerVal &&
-    sourceAnswerVal.toUpperCase() === aiAnswerVal.toUpperCase()
-  );
 
   // Helper to extract option text from key (A/B/C/D)
   const getOptionText = (key: string) => {
@@ -308,14 +298,93 @@ export default function ReviewStep({
     return "";
   };
 
-  const sourceKey = (currentQuestion?.source_answer_key || sourceAnswerVal || "").trim().toUpperCase();
-  const sourceText = currentQuestion?.source_answer_text || getOptionText(sourceKey);
+  // Helper to resolve an answer key or text into both its canonical key (A-D) and full option text
+  const resolveProvenance = (q: QuestionRow | undefined, keyOrText: string | undefined | null) => {
+    if (!q || !keyOrText) return { key: "", text: "" };
+    const trimmed = String(keyOrText).trim();
+    const upper = trimmed.toUpperCase();
 
-  const aiKey = (currentQuestion?.ai_answer_key || aiAnswerVal || "").trim().toUpperCase();
-  const aiText = currentQuestion?.ai_answer_text || getOptionText(aiKey);
+    // If letter A, B, C, D
+    if (upper === "A" || upper === "B" || upper === "C" || upper === "D") {
+      let optText = "";
+      if (upper === "A") optText = q.data_json?.[optAKey] || "";
+      if (upper === "B") optText = q.data_json?.[optBKey] || "";
+      if (upper === "C") optText = q.data_json?.[optCKey] || "";
+      if (upper === "D") optText = q.data_json?.[optDKey] || "";
+      return { key: upper, text: optText || trimmed };
+    }
 
-  const finalKey = (currentQuestion?.final_answer_key || finalAnswerVal || "").trim().toUpperCase();
-  const finalText = currentQuestion?.final_answer_text || getOptionText(finalKey);
+    // Check if keyOrText matches one of the option texts
+    const optA = String(q.data_json?.[optAKey] || "").trim();
+    const optB = String(q.data_json?.[optBKey] || "").trim();
+    const optC = String(q.data_json?.[optCKey] || "").trim();
+    const optD = String(q.data_json?.[optDKey] || "").trim();
+
+    if (optA && optA.toLowerCase() === trimmed.toLowerCase()) return { key: "A", text: optA };
+    if (optB && optB.toLowerCase() === trimmed.toLowerCase()) return { key: "B", text: optB };
+    if (optC && optC.toLowerCase() === trimmed.toLowerCase()) return { key: "C", text: optC };
+    if (optD && optD.toLowerCase() === trimmed.toLowerCase()) return { key: "D", text: optD };
+
+    return { key: "", text: trimmed };
+  };
+
+  // Distinct Answer Provenance & Decision State
+  const rawSourceAns = (
+    currentQuestion?.source_answer_text ||
+    currentQuestion?.source_answer ||
+    currentQuestion?.source_metadata?.answer_source ||
+    ""
+  ).trim();
+
+  const rawAiAns = (
+    currentQuestion?.ai_answer_text ||
+    currentQuestion?.ai_answer ||
+    currentQuestion?.validation?.ai_validation?.ai_answer ||
+    ""
+  ).trim();
+
+  const sourceProv = resolveProvenance(currentQuestion, rawSourceAns);
+  const sourceKey = sourceProv.key || (currentQuestion?.source_answer_key || "").trim().toUpperCase();
+  const sourceText = sourceProv.text || currentQuestion?.source_answer_text || getOptionText(sourceKey) || rawSourceAns;
+  const sourceAnswerVal = sourceText || sourceKey;
+
+  const aiProv = resolveProvenance(currentQuestion, rawAiAns);
+  const aiKey = aiProv.key || (currentQuestion?.ai_answer_key || "").trim().toUpperCase();
+  const aiText = aiProv.text || currentQuestion?.ai_answer_text || getOptionText(aiKey) || rawAiAns;
+  const aiAnswerVal = aiText || aiKey;
+
+  const rawFinalAns = (
+    currentQuestion?.final_answer_text ||
+    currentQuestion?.final_answer ||
+    currentQuestion?.data_json?.[answerKey] ||
+    sourceText ||
+    aiText ||
+    ""
+  ).trim();
+
+  const finalProv = resolveProvenance(currentQuestion, rawFinalAns);
+  const finalKey = finalProv.key || (currentQuestion?.final_answer_key || "").trim().toUpperCase();
+  const finalText = finalProv.text || currentQuestion?.final_answer_text || getOptionText(finalKey) || rawFinalAns;
+  const finalAnswerVal = finalText;
+
+  const aiConfidenceVal =
+    typeof currentQuestion?.validation?.ai_validation?.confidence === "number"
+      ? currentQuestion.validation.ai_validation.confidence
+      : 0.98;
+
+  const isAnswerConflict = Boolean(
+    sourceKey &&
+    aiKey &&
+    sourceKey !== aiKey
+  );
+
+  const isMissingSource = !sourceAnswerVal && !sourceKey;
+
+  const isMatchesSource = Boolean(
+    sourceKey &&
+    aiKey &&
+    sourceKey === aiKey
+  );
 
   const duplicateOptionsMessage = useMemo(() => {
     if (!currentQuestion) return null;
@@ -409,16 +478,30 @@ export default function ReviewStep({
     return (q.ai_answer_key || aiVal || "").trim().toUpperCase();
   };
 
+  // Helper to determine if a value is missing or empty
+  const isFieldMissing = (val: unknown) => {
+    if (val === null || val === undefined) return true;
+    const str = String(val).trim();
+    return str === "" || str === "null" || str === "undefined";
+  };
+
+  // Helper to identify core question/option/answer columns (which are not metadata)
+  const isCoreQuestionColumn = (col: string) => {
+    const coreFields = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
+    if (coreFields.has(col)) return true;
+    const answerKeywords = ["answer", "correct", "solution", "key"];
+    if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return true;
+    if (/question|item_text|prompt/i.test(col)) return true;
+    if (/option|choice/i.test(col)) return true;
+    return false;
+  };
+
   // Total missing metadata fields across the entire assessment
   const totalMissingFieldsCount = useMemo(() => {
-    const coreFields = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
-    const answerKeywords = ["answer", "correct", "solution", "key"];
     let total = 0;
     localQuestions.forEach((q) => {
       columns.forEach((col) => {
-        if (coreFields.has(col)) return;
-        if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return;
-        if (!String(q.data_json?.[col] || "").trim()) {
+        if (!isCoreQuestionColumn(col) && isFieldMissing(q.data_json?.[col])) {
           total += 1;
         }
       });
@@ -443,8 +526,12 @@ export default function ReviewStep({
 
   const handleSetQuestionFinalAnswer = (q: QuestionRow, newAnswer: string) => {
     if (!q || !newAnswer) return;
-    q.final_answer = newAnswer;
-    onCellChange(q.id, answerKey, newAnswer);
+    const { key, text } = resolveProvenance(q, newAnswer);
+    const resolvedText = text || newAnswer;
+    q.final_answer = resolvedText;
+    q.final_answer_text = resolvedText;
+    q.final_answer_key = key || q.final_answer_key;
+    onCellChange(q.id, answerKey, resolvedText);
   };
 
   const handleSetFinalAnswer = (newAnswer: string) => {
@@ -470,7 +557,12 @@ export default function ReviewStep({
 
     for (let i = 0; i < total; i++) {
       const q = targetQuestions[i];
-      const targetAns = type === "source" ? getQuestionSourceKey(q) : getQuestionAiKey(q);
+      const rawAns = type === "source"
+        ? (q.source_answer_text || q.source_answer || getQuestionSourceKey(q))
+        : (q.ai_answer_text || q.ai_answer || getQuestionAiKey(q));
+
+      const { key, text } = resolveProvenance(q, rawAns);
+      const targetAns = text || rawAns;
 
       setBulkProgressMessage(
         `Processing question ${i + 1} of ${total}: ${type === "source" ? "Preserving source answer" : "Applying AI suggestion"} (${targetAns})...`
@@ -485,14 +577,29 @@ export default function ReviewStep({
         const persistedQ = await updateQuestion(q.id, { [answerKey]: targetAns });
         const idxInList = updatedList.findIndex((item) => item.id === q.id);
         if (idxInList !== -1) {
-          updatedList[idxInList] = persistedQ;
+          updatedList[idxInList] = {
+            ...persistedQ,
+            final_answer: targetAns,
+            final_answer_text: targetAns,
+            final_answer_key: key,
+          };
         }
         updatedCount += 1;
       } catch (err: any) {
         failedCount += 1;
-        if (failedReasons.length < 3) {
-          failedReasons.push(err?.message || "Save failed");
+        failedReasons.push(err?.message || `Question #${q.row_number || i + 1} failed`);
+        const idxInList = updatedList.findIndex((item) => item.id === q.id);
+        const fallbackQ: QuestionRow = {
+          ...q,
+          final_answer: targetAns,
+          final_answer_key: key,
+          final_answer_text: targetAns,
+          data_json: { ...(q.data_json || {}), [answerKey]: targetAns },
+        };
+        if (idxInList !== -1) {
+          updatedList[idxInList] = fallbackQ;
         }
+        onCellChange(q.id, answerKey, targetAns);
       }
     }
 
@@ -531,14 +638,12 @@ export default function ReviewStep({
     if (!currentQuestion) return [];
     const missing: string[] = [];
     columns.forEach((col) => {
-      const val = (currentQuestion.data_json?.[col] || "").trim();
-      const isCoreStemOrOpt = [questionKey, optAKey, optBKey, optCKey, optDKey, answerKey].includes(col);
-      if (!val && !isCoreStemOrOpt) {
+      if (!isCoreQuestionColumn(col) && isFieldMissing(currentQuestion.data_json?.[col])) {
         missing.push(col);
       }
     });
     return missing;
-  }, [currentQuestion, columns, questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
+  }, [currentQuestion, columns]);
 
   // Suggestions specifically for current question
   const currentQuestionSuggestions = useMemo(() => {
@@ -609,26 +714,20 @@ export default function ReviewStep({
         setAiSuggestions((prev) => prev ? prev.filter((s) => s.questionId !== updatedQuestion.id) : null);
       }
 
-      // Compute remaining missing fields after fill for the success message
-      const coreFields = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
-      const answerKeywords = ["answer", "correct", "solution", "key"];
-      const stillMissing = columns.filter((col) => {
-        if (coreFields.has(col)) return false;
-        if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return false;
-        return !String(updatedQuestion.data_json?.[col] || "").trim();
-      });
+      const res = updatedQuestion.ai_fill_result;
+      const resCount = res?.resolved_count ?? 0;
+      const unresCount = (res?.review_required_count ?? 0) + (res?.unresolved_count ?? 0);
 
-      const previousMissingCount = currentMissingFields.length;
-
-      if (stillMissing.length === 0 && previousMissingCount > 0) {
-        setAiSuccessNotice("✓ All eligible missing fields filled");
-      } else if (stillMissing.length < previousMissingCount) {
-        const reviewCount = stillMissing.length;
-        setAiSuccessNotice(`⚠ ${reviewCount} field${reviewCount === 1 ? "" : "s"} require review`);
-      } else if (previousMissingCount === 0) {
+      if (res?.status === "already_complete" || (resCount === 0 && unresCount === 0 && currentMissingFields.length === 0)) {
         setAiSuccessNotice("All schema metadata fields are already populated.");
+      } else if (unresCount === 0 && resCount > 0) {
+        setAiSuccessNotice(`✓ ${resCount} field${resCount === 1 ? "" : "s"} filled • 0 fields remaining`);
+      } else if (resCount > 0 && unresCount > 0) {
+        setAiSuccessNotice(`✓ ${resCount} field${resCount === 1 ? "" : "s"} filled • ${unresCount} field${unresCount === 1 ? "" : "s"} require review`);
+      } else if (resCount === 0 && unresCount > 0) {
+        setAiSuccessNotice(`0 fields filled • ${unresCount} field${unresCount === 1 ? "" : "s"} require review`);
       } else {
-        setAiSuccessNotice("No fields could be safely inferred. Review manually.");
+        setAiSuccessNotice("AI inference completed.");
       }
     } catch (e) {
       let safeMsg = "AI field inference failed. Please try again.";
@@ -645,8 +744,7 @@ export default function ReviewStep({
   };
 
   // ──────────────────────────────────────────────────────────────────────────────
-  // BATCH AI Fill — resolves missing fields for all questions sequentially
-  // Processes ALL selected questions without silently skipping, reporting exact counts.
+  // BATCH AI Fill — resolves missing fields for all questions in one atomic operation
   // ──────────────────────────────────────────────────────────────────────────────
   const handleTriggerBatchAIFill = async () => {
     if (localQuestions.length === 0) return;
@@ -656,14 +754,7 @@ export default function ReviewStep({
     setIsProcessingBulk(true);
     setAiFillError("");
     setAiSuccessNotice("");
-    setBatchFillProgress("");
-
-    let processedCount = 0;
-    let updatedCount = 0;
-    let alreadyCompleteCount = 0;
-    let needsReviewCount = 0;
-    let unableToInferCount = 0;
-    let failedCount = 0;
+    setBatchFillProgress("Running bulk AI fill for all questions...");
 
     const context = {
       subject: batchConfig.subject || "General",
@@ -671,94 +762,54 @@ export default function ReviewStep({
       chapterTopic: batchConfig.chapterTopic || "General",
       questionType: batchConfig.questionType || "Multiple Choice (MCQ)",
     };
-    const coreFieldSet = new Set([questionKey, optAKey, optBKey, optCKey, optDKey, answerKey]);
-    const answerKeywords = ["answer", "correct", "solution", "key"];
 
-    const updatedQuestions = [...localQuestions];
+    try {
+      const batchRes = await batchAiFillQuestionFields(localQuestions.map((q) => q.id), context);
+      const { summary, questions: updatedQuestions } = batchRes;
 
-    for (let i = 0; i < localQuestions.length; i++) {
-      const q = updatedQuestions[i];
-      setBatchFillProgress(`Processing question ${i + 1} of ${localQuestions.length}...`);
+      // Apply all updates at once
+      setLocalQuestions(updatedQuestions);
+      onQuestionsUpdate?.(updatedQuestions);
 
-      // Compute missing fields for this question
-      const missingCount = columns.filter((col) => {
-        if (coreFieldSet.has(col)) return false;
-        if (answerKeywords.some((kw) => col.toLowerCase().includes(kw))) return false;
-        return !String(q.data_json?.[col] || "").trim();
-      }).length;
-
-      processedCount += 1;
-
-      if (missingCount === 0) {
-        alreadyCompleteCount += 1;
-        continue;
-      }
-
-      try {
-        const updatedQ = await aiFillQuestionFields(q.id, context);
-        updatedQuestions[i] = updatedQ;
-
-        const resStatus = updatedQ.ai_fill_result?.status;
-        if (resStatus === "updated") {
-          updatedCount += 1;
-          if ((updatedQ.ai_fill_result?.review_required_count || 0) > 0) {
-            needsReviewCount += 1;
+      // Collect all pending suggestions from the updated questions
+      const allPendingSuggestions: NormalizedQuestionSuggestion[] = [];
+      updatedQuestions.forEach((uq) => {
+        const pendingFields: Record<string, NormalizedFieldSuggestion> = {};
+        Object.entries(uq.source_metadata?.fields || {}).forEach(([fname, fval]: [string, any]) => {
+          if (fval.review_required && fval.ai_suggestion) {
+            pendingFields[fname] = {
+              fieldName: fname,
+              value: fval.ai_suggestion,
+              status: "AI_INFERRED",
+              confidence: fval.confidence,
+              reason: fval.reason,
+              isEditing: false,
+              editValue: fval.ai_suggestion,
+            };
           }
-        } else if (resStatus === "needs_review") {
-          needsReviewCount += 1;
-        } else if (resStatus === "already_complete") {
-          alreadyCompleteCount += 1;
-        } else {
-          unableToInferCount += 1;
-        }
-      } catch {
-        failedCount += 1;
-      }
-    }
-
-    // Collect all pending suggestions from the updated questions
-    const allPendingSuggestions: NormalizedQuestionSuggestion[] = [];
-    updatedQuestions.forEach((uq) => {
-      const pendingFields: Record<string, NormalizedFieldSuggestion> = {};
-      Object.entries(uq.source_metadata?.fields || {}).forEach(([fname, fval]: [string, any]) => {
-        if (fval.review_required && fval.ai_suggestion) {
-          pendingFields[fname] = {
-            fieldName: fname,
-            value: fval.ai_suggestion,
-            status: "AI_INFERRED",
-            confidence: fval.confidence,
-            reason: fval.reason,
-            isEditing: false,
-            editValue: fval.ai_suggestion,
-          };
+        });
+        if (Object.keys(pendingFields).length > 0) {
+          allPendingSuggestions.push({
+            questionId: uq.id,
+            rowNumber: uq.row_number || 1,
+            questionPrompt: uq.data_json?.[questionKey] || `Question #${uq.row_number}`,
+            fields: pendingFields,
+          });
         }
       });
-      if (Object.keys(pendingFields).length > 0) {
-        allPendingSuggestions.push({
-          questionId: uq.id,
-          rowNumber: uq.row_number || 1,
-          questionPrompt: uq.data_json?.[questionKey] || `Question #${uq.row_number}`,
-          fields: pendingFields,
-        });
-      }
-    });
 
-    setAiSuggestions((prev) => {
-      const batchIds = new Set(updatedQuestions.map((q) => q.id));
-      const list = prev ? prev.filter((s) => !batchIds.has(s.questionId)) : [];
-      return [...list, ...allPendingSuggestions];
-    });
+      setAiSuggestions(allPendingSuggestions.length > 0 ? allPendingSuggestions : null);
 
-    // Apply all updates at once
-    setLocalQuestions(updatedQuestions);
-    onQuestionsUpdate?.(updatedQuestions);
-    setBatchFillProgress("");
-    setIsBatchFilling(false);
-    setIsProcessingBulk(false);
-
-    setAiSuccessNotice(
-      `Processed ${processedCount} / ${localQuestions.length} • Updated ${updatedCount} • Already complete ${alreadyCompleteCount} • Needs review ${needsReviewCount} • Unable to infer ${unableToInferCount} • Failed ${failedCount}`
-    );
+      setAiSuccessNotice(
+        `AI Fill Complete • Questions processed: ${summary.questions_processed} • Fields filled: ${summary.fields_filled} • Already populated: ${summary.already_populated} • Needs review: ${summary.needs_review} • Failed: ${summary.failed}`
+      );
+    } catch (err: any) {
+      setAiFillError(err?.message || "Bulk AI fill failed. Please try again.");
+    } finally {
+      setBatchFillProgress("");
+      setIsBatchFilling(false);
+      setIsProcessingBulk(false);
+    }
   };
 
   // Guard for batch fill: open confirmation modal before processing

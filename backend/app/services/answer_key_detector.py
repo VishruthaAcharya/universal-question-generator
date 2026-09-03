@@ -5,7 +5,8 @@ from typing import Any
 ANSWER_KEY_HEADING_PATTERNS = [
     re.compile(r"^\s*(?:#+\s*)?(?:answers?\s*keys?|solutions?\s*keys?|correct\s*answers?|answer\s*sheet|solutions?|correct\s*options?|key\s*answers?|answers?\s*to\s*questions?|key\s*to\s*assessment|answers?\s*(?:key)?\s*(?:&|and)\s*solutions?|answers?)\s*[:\-]*\s*$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*SECTION\s*[A-Z0-9]*\s*[\:\-]\s*(?:ANSWER\s*KEY|SOLUTIONS|ANSWERS)\s*$", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^\s*(?:CHAPTER|UNIT)\s*\d+\s*[\:\-]\s*(?:ANSWER\s*KEY|ANSWERS|SOLUTIONS)\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*(?:CHAPTER|UNIT|IMAGE|FILE|PAGE|TEST|SET|PAPER|GROUP)\s*\d+\s*[\:\-]\s*(?:ANSWER\s*KEY|ANSWERS|SOLUTIONS)\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*(?:IMAGE|FILE|PAGE|TEST|SET|PAPER|GROUP|CHAPTER|UNIT|SECTION|PART)\s*[A-Za-z0-9IVXLCDM\.\-_\s]+(?:\s*[\:\-]\s*(?:ANSWER\s*KEY|ANSWERS|SOLUTIONS)?)?\s*$", re.IGNORECASE | re.MULTILINE),
 ]
 
 # Patterns for discrete answer key entries
@@ -28,7 +29,7 @@ RANGE_GROUPED_PATTERN = re.compile(
 
 # Chapter or section header pattern
 CHAPTER_HEADER_PATTERN = re.compile(
-    r"^\s*(?:CHAPTER|UNIT|SECTION|PART)\s*([A-Za-z0-9IVXLCDM\.\-\s]+)(?:[\:\-\.]\s*(.*))?$",
+    r"^\s*(?:CHAPTER|UNIT|SECTION|PART|IMAGE|FILE|PAGE|TEST|SET|PAPER|GROUP)\s*([A-Za-z0-9IVXLCDM\.\-_\s]+)(?:[\:\-\.]\s*(.*))?$",
     re.IGNORECASE | re.MULTILINE
 )
 
@@ -55,7 +56,6 @@ def is_answer_key_text(text: str) -> bool:
             break
 
     # 2. Check density of answer key entries vs full question sentences
-    # An answer key page usually has many short "1. A, 2. B" entries and almost no long option blocks "(A) ... (B) ... (C) ..."
     compact_matches = list(COMPACT_ENTRY_PATTERN.finditer(clean_text))
     discrete_matches = list(DISCRETE_ENTRY_PATTERN.finditer(clean_text))
     range_matches = list(RANGE_GROUPED_PATTERN.finditer(clean_text))
@@ -70,22 +70,16 @@ def is_answer_key_text(text: str) -> bool:
             except Exception:
                 total_key_entries += 5
 
-    # Check for presence of question stem indicators (e.g. "?", "which of the following", "calculate", "find the")
     question_indicators = len(re.findall(r"\?|which of the following|what is the|calculate|find the|explain", clean_text, re.IGNORECASE))
 
-    # If the page contains MCQ options (A., B., C., D.) and has no explicit Answer Key heading,
-    # it is a question content page, not an answer key page.
     opt_lines_count = len(re.findall(r"^\s*(?:\([A-Da-d1-4]\)|[A-Da-d1-4][\.\)])\s+", clean_text, re.MULTILINE))
     if opt_lines_count >= 3 and not has_explicit_heading:
         return False
 
     if has_explicit_heading:
-        # If explicit heading and at least 1 entry or low question indicator count, it is an answer key
         return True
 
-    # If high concentration of answer pairs and very few question indicators
     if total_key_entries >= 4 and question_indicators <= 1:
-        # Check average line length (answer keys are very compact)
         avg_line_len = sum(len(l) for l in lines) / len(lines)
         if avg_line_len < 40 or total_key_entries >= len(lines) * 0.4:
             return True
@@ -103,6 +97,7 @@ def extract_answer_key_entries(
     Handles multiple formats:
     - 1. A, 2. B, 3. C
     - Q1 - A, Q2 - B
+    - Q1 = 60 km/h, Q2 = 180
     - 1-A, 2-B, 3-C
     - 1) A, 2) B
     - 1-10: A B C D A B C D A B
@@ -118,7 +113,6 @@ def extract_answer_key_entries(
     current_chapter = chapter_name
     current_section = section_name
 
-    # Check for chapter / section headers within the text
     lines = clean_text.splitlines()
     
     # 1. First check Range Grouped pattern e.g. "1-10: A B C D A B C D A B"
@@ -127,7 +121,6 @@ def extract_answer_key_entries(
             start_num = int(r_match.group(1))
             end_num = int(r_match.group(2))
             raw_tokens = r_match.group(3).strip()
-            # Split tokens by space or comma
             ans_tokens = [t.strip().upper() for t in re.split(r"[\s\,\;]+", raw_tokens) if t.strip()]
             
             for idx, q_num in enumerate(range(start_num, end_num + 1)):
@@ -140,10 +133,11 @@ def extract_answer_key_entries(
                             "source_page": page_number,
                             "source_section": current_section,
                             "source_chapter": current_chapter,
+                            "answer_key_group": current_chapter or current_section,
                             "source_type": "EXPLICIT_ANSWER_KEY",
                             "raw_text": f"{q_num}: {ans_letter}"
                         })
-                        seen_q_nums.add(q_num)
+                        seen_q_nums.add((q_num, current_chapter))
         except Exception:
             pass
 
@@ -153,10 +147,11 @@ def extract_answer_key_entries(
         if not trimmed:
             continue
 
-        # Check chapter header
+        # Check chapter / image header e.g. "IMAGE 1", "IMAGE 2", "CHAPTER 1", "SECTION A"
         chap_m = CHAPTER_HEADER_PATTERN.match(trimmed)
         if chap_m:
             current_chapter = chap_m.group(0).strip()
+            current_section = chap_m.group(0).strip()
             continue
 
         # Check section header
@@ -171,20 +166,48 @@ def extract_answer_key_entries(
                 try:
                     q_num = int(cm.group(1))
                     ans_val = cm.group(2).strip().upper()
-                    if q_num not in seen_q_nums or current_chapter:
+                    entry_key = (q_num, current_chapter)
+                    if entry_key not in seen_q_nums:
                         entries.append({
                             "question_number": q_num,
                             "answer": ans_val,
                             "source_page": page_number,
                             "source_section": current_section,
                             "source_chapter": current_chapter,
+                            "answer_key_group": current_chapter or current_section,
                             "source_type": "EXPLICIT_ANSWER_KEY",
                             "raw_text": cm.group(0)
                         })
-                        seen_q_nums.add(q_num)
+                        seen_q_nums.add(entry_key)
                 except Exception:
                     pass
             continue
+
+        # Check single line key-value e.g. "Q1 = 60 km/h", "Q1: 60 km/h", "1. 60 km/h", "Q6 = All squares are rectangles."
+        line_kv = re.match(r"^\s*(?:[\[\(]?\s*(?:Q(?:uestion)?[\s\.\:\-]*)?(\d+|[A-Za-z]\d+)\s*[\.\)\:\-\]]*)\s*[\:\-\=\s]\s*(.+)$", trimmed)
+        if line_kv and not chap_m and not any(pat.match(trimmed) for pat in ANSWER_KEY_HEADING_PATTERNS):
+            q_num_raw = line_kv.group(1).strip()
+            ans_raw = line_kv.group(2).strip()
+            if len(ans_raw) <= 80 and not any(ans_raw.lower().startswith(w) for w in ["what ", "which ", "how ", "why ", "calculate ", "find "]):
+                try:
+                    q_num = int(q_num_raw)
+                except ValueError:
+                    q_num = q_num_raw
+                ans_clean = ans_raw.upper() if len(ans_raw) <= 2 and ans_raw.upper() in "ABCD" else ans_raw
+                entry_key = (q_num, current_chapter)
+                if entry_key not in seen_q_nums:
+                    entries.append({
+                        "question_number": q_num,
+                        "answer": ans_clean,
+                        "source_page": page_number,
+                        "source_section": current_section,
+                        "source_chapter": current_chapter,
+                        "answer_key_group": current_chapter or current_section,
+                        "source_type": "EXPLICIT_ANSWER_KEY",
+                        "raw_text": trimmed
+                    })
+                    seen_q_nums.add(entry_key)
+                continue
 
         # Check discrete single or multi entries on the line e.g. "1. B", "Q1 - D", "1) C"
         discrete_matches = list(DISCRETE_ENTRY_PATTERN.finditer(trimmed))
@@ -192,20 +215,15 @@ def extract_answer_key_entries(
             q_num_raw = dm.group(1).strip()
             ans_raw = dm.group(2).strip()
 
-            # Ignore if answer is too long or looks like question text
-            if len(ans_raw) > 40:
+            if len(ans_raw) > 80:
                 continue
 
             try:
-                # Try integer question number
                 q_num = int(q_num_raw)
             except ValueError:
-                q_num = q_num_raw  # Keep as string e.g. "Q1" or "1A"
+                q_num = q_num_raw
 
-            # Filter valid answer options (A, B, C, D, 1, 2, 3, 4, True, False, or short word)
-            ans_clean = ans_raw.upper() if len(ans_raw) <= 2 else ans_raw
-            
-            # Avoid duplicate matching of the same entry in the same chapter/page
+            ans_clean = ans_raw.upper() if len(ans_raw) <= 2 and ans_raw.upper() in "ABCD" else ans_raw
             entry_key = (q_num, current_chapter)
             if entry_key not in seen_q_nums:
                 entries.append({
@@ -214,6 +232,7 @@ def extract_answer_key_entries(
                     "source_page": page_number,
                     "source_section": current_section,
                     "source_chapter": current_chapter,
+                    "answer_key_group": current_chapter or current_section,
                     "source_type": "EXPLICIT_ANSWER_KEY",
                     "raw_text": dm.group(0)
                 })

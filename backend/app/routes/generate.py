@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import hashlib
 import logging
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Body
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from app.database import get_db
 from app.models.models import Template, QuestionSet, Question
 from app.services.template import read_template_schema, normalize_field_name
@@ -66,18 +68,19 @@ def _build_question_response(q: Question) -> dict:
     """Shared helper: build the canonical question response dict from a Question ORM object."""
     sm = q.source_metadata_json or {}
     val = q.validation_json or {}
+    ai_val = val.get("ai_validation") or {}
     
-    source_answer_key = sm.get("source_answer_key") or val.get("ai_validation", {}).get("source_answer") or ""
+    source_answer_key = sm.get("source_answer_key") or ai_val.get("source_answer") or ""
     source_answer_key = str(source_answer_key).strip()
     
-    source_answer_text = sm.get("source_answer_text") or val.get("ai_validation", {}).get("source_answer_text") or ""
+    source_answer_text = sm.get("source_answer_text") or ai_val.get("source_answer_text") or ""
     if not source_answer_text and source_answer_key in ("A", "B", "C", "D"):
         source_answer_text = get_option_text_by_key(q.data_json, source_answer_key)
         
-    ai_answer_key = sm.get("ai_answer_key") or val.get("ai_validation", {}).get("ai_answer") or ""
+    ai_answer_key = sm.get("ai_answer_key") or ai_val.get("ai_answer") or ""
     ai_answer_key = str(ai_answer_key).strip()
     
-    ai_answer_text = sm.get("ai_answer_text") or val.get("ai_validation", {}).get("ai_answer_text") or ""
+    ai_answer_text = sm.get("ai_answer_text") or ai_val.get("ai_answer_text") or ""
     if not ai_answer_text and ai_answer_key in ("A", "B", "C", "D"):
         ai_answer_text = get_option_text_by_key(q.data_json, ai_answer_key)
 
@@ -462,6 +465,49 @@ def ai_fill_fields(payload: dict = Body(...)):
         raise HTTPException(status_code=500, detail=f"AI Fill Fields failed: {e}")
 
 
+def is_field_missing(val: Any) -> bool:
+    """
+    Field-aware missing detection:
+    Treats None, empty strings, whitespace-only strings, and explicit unresolved markers as missing.
+    Preserves valid numeric (0, 0.0) and boolean (False) values.
+    """
+    if val is None:
+        return True
+    if isinstance(val, (int, float, bool)):
+        return False
+    s = str(val).strip()
+    if not s or s.lower() in ("null", "undefined", "none", "n/a", "na", "-", "--", "unresolved", "[unresolved]"):
+        return True
+    return False
+
+def is_core_question_column(col_name: str) -> bool:
+    """
+    Identifies if a column is strictly a core question prompt, option text, or answer key.
+    Metadata columns like Topic, Subtopic, Difficulty, Marks, Score, Bloom's Taxonomy, Question Type, Domain,
+    Explanation, Hint, Tags, etc. are NOT core columns and CAN be populated if missing.
+    """
+    col_clean = col_name.strip().lower()
+    
+    # 1. Main question prompt / stem
+    if col_clean in ("question", "question stem", "question prompt", "prompt", "item text", "problem statement", "stem"):
+        return True
+    
+    # 2. Options (A, B, C, D, 1, 2, 3, 4)
+    if col_clean in ("option a", "option b", "option c", "option d", "option 1", "option 2", "option 3", "option 4",
+                     "answer 1", "answer 2", "answer 3", "answer 4", "choice a", "choice b", "choice c", "choice d"):
+        return True
+    if re.match(r"^(?:option|choice)[\s_\-\.]*[a-d1-4]$", col_clean):
+        return True
+    if re.match(r"^answer[\s_\-\.]*[1-4]$", col_clean):
+        return True
+
+    # 3. Correct answer / answer key
+    if col_clean in ("correct answer", "answer key", "correct option", "correct choice", "answer", "key"):
+        return True
+    
+    return False
+
+
 @router.post("/questions/{question_id}/ai-fill")
 def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Session = Depends(get_db)):
     """
@@ -469,10 +515,10 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
 
     Flow:
     1. Load question + template schema from DB
-    2. Dynamically compute ALL truly-missing fields (empty data_json values, excluding answer/core columns)
+    2. Dynamically compute ALL truly-missing fields (using field-aware detection, excluding core prompt/option/answer columns)
     3. Make ONE focused AI call to infer all missing fields simultaneously
-    4. Validate AI response has an entry for every requested field
-    5. Atomically persist all resolved fields (confidence >= threshold) in one db.commit()
+    4. Validate AI response against schema
+    5. Atomically persist all resolved fields in one db.commit()
     6. Re-run validation
     7. Return complete updated question object
     """
@@ -485,7 +531,7 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
     )
 
     # --- 1. Load question and template ---
-    q = db.get(Question, question_id)
+    q = db.query(Question).filter(Question.id == question_id).first()
     if not q:
         raise HTTPException(status_code=404, detail="Question not found")
 
@@ -499,27 +545,23 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
 
     context = payload.get("context", {})
 
-    # --- 2. Identify answer/core columns to protect ---
-    # These are columns that should never be auto-filled: question, options, and answer-related fields
-    answer_keywords = {"answer", "correct", "solution", "key", "option", "choice", "question", "prompt", "stem"}
-    answer_cols = set()
-    for col in columns:
-        col_lower = col.lower()
-        if any(kw in col_lower for kw in answer_keywords):
-            answer_cols.add(col)
-
-    # --- 3. Compute truly-missing fields (empty in data_json, not an answer column) ---
+    # --- 2. Compute truly-missing fields using field-aware detection ---
+    core_cols = {col for col in columns if is_core_question_column(col)}
     data_json = dict(q.data_json or {})
     missing_fields = [
         col for col in columns
-        if col not in answer_cols and not str(data_json.get(col, "") or "").strip()
+        if col not in core_cols and is_field_missing(data_json.get(col))
     ]
 
+    # Target debug field if present
+    debug_col = next((c for c in columns if "sub" in c.lower() and "topic" in c.lower()), (missing_fields[0] if missing_fields else "sub_topic"))
+    before_debug_val = data_json.get(debug_col)
+
     logger.info(
-        "AI_FILL_START | question_id=%s | total_columns=%d | answer_cols=%s | missing_fields=%s",
+        "AI_FILL_START | question_id=%s | total_columns=%d | core_cols=%s | missing_fields=%s",
         question_id,
         len(columns),
-        list(answer_cols),
+        list(core_cols),
         missing_fields,
     )
 
@@ -536,7 +578,7 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         }
         return resp
 
-    # --- 4. Make ONE focused AI call ---
+    # --- 3. Make ONE focused AI call ---
     try:
         fill_result = fill_missing_fields_for_single_question(
             question_data=data_json,
@@ -548,7 +590,7 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         logger.error("AI_FILL_ERROR | question_id=%s | error=%s", question_id, str(e))
         raise HTTPException(status_code=500, detail=f"AI fill failed: {e}")
 
-    # --- 5. Persist all resolved fields atomically ---
+    # --- 4. Persist all resolved fields atomically ---
     new_data = dict(data_json)
     new_metadata = dict(q.source_metadata_json or {"source_page": None, "fields": {}})
     if "fields" not in new_metadata:
@@ -564,24 +606,24 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         confidence = float(field_result.get("confidence", 0.0))
         reason = field_result.get("reason", "")
 
-        if status == "AI_INFERRED" and value and confidence >= AI_FILL_CONFIDENCE_THRESHOLD:
-            # Persist: update data and metadata with explicit provenance
-            new_data[field_name] = str(value)
+        if status == "AI_INFERRED" and value is not None and str(value).strip() != "" and confidence >= AI_FILL_CONFIDENCE_THRESHOLD:
+            val_str = str(value).strip()
+            new_data[field_name] = val_str
             new_metadata["fields"][field_name] = {
                 "origin": "AI_INFERRED",
                 "status": "AI_INFERRED",
-                "value": str(value),
+                "value": val_str,
                 "confidence": confidence,
                 "reason": reason,
             }
             resolved_fields.append(field_name)
-        elif status == "AI_INFERRED" and value and confidence < AI_FILL_CONFIDENCE_THRESHOLD:
-            # Below threshold — flag for review with reason/evidence
+        elif status == "AI_INFERRED" and value is not None and str(value).strip() != "" and confidence < AI_FILL_CONFIDENCE_THRESHOLD:
+            val_str = str(value).strip()
             new_metadata["fields"][field_name] = {
                 "origin": "AI_INFERRED",
                 "status": "REVIEW_REQUIRED",
                 "confidence": confidence,
-                "ai_suggestion": str(value),
+                "ai_suggestion": val_str,
                 "review_required": True,
                 "reason": reason or "Low confidence inference requiring human sign-off.",
             }
@@ -604,7 +646,7 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         unresolved_fields,
     )
 
-    # --- 6. Re-run validation ---
+    # --- 5. Re-run validation ---
     errors = validate_question_row(new_data, template_schema)
     existing_ai_val = q.validation_json.get("ai_validation") if q.validation_json else None
     val_status = {
@@ -613,13 +655,33 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         "ai_validation": existing_ai_val,
     }
 
-    # --- 7. Atomic DB commit ---
+    # --- 6. Atomic DB commit ---
+    from sqlalchemy.orm.attributes import flag_modified
     q.data_json = new_data
     q.source_metadata_json = new_metadata
     q.validation_json = val_status
     q.status = "VALIDATED" if val_status["valid"] else "INVALID"
+    flag_modified(q, "data_json")
+    flag_modified(q, "source_metadata_json")
+    flag_modified(q, "validation_json")
     db.commit()
     db.refresh(q)
+
+    after_debug_val = q.data_json.get(debug_col)
+
+    # Required Debug Log Block
+    logger.info(
+        "\n[AI_FILL]\nquestion_id=%s\nbefore.%s=%s\ncomputed_missing_fields=%s\nsending_to_ai=%s\nai_response=%s\nvalidated_value=%s\npersisting=...\nafter.%s=%s\n",
+        q.id,
+        debug_col,
+        before_debug_val,
+        missing_fields,
+        missing_fields,
+        {k: v.get("value") for k, v in fill_result.items()},
+        fill_result.get(debug_col, {}).get("value"),
+        debug_col,
+        after_debug_val,
+    )
 
     logger.info(
         "AI_FILL_COMPLETE | question_id=%s | resolved_count=%d | unresolved_count=%d | review_required_count=%d",
@@ -647,9 +709,184 @@ def ai_fill_question_fields(question_id: str, payload: dict = Body(...), db: Ses
         "resolved_fields": resolved_fields,
         "review_required_fields": review_required_fields,
         "unresolved_fields": unresolved_fields,
+        "message": f"{len(resolved_fields)} fields filled, {len(review_required_fields) + len(unresolved_fields)} fields remaining",
     }
 
     return resp
+
+
+@router.post("/questions/batch-ai-fill")
+def batch_ai_fill_questions(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    ONE-CLICK complete missing-field resolution for multiple questions (Bulk / Universal AI Fill).
+    Processes all questions, resolves missing fields, persists atomically, and returns detailed summary.
+    """
+    import logging
+    from concurrent.futures import ThreadPoolExecutor
+    logger = logging.getLogger("ai_fill")
+
+    from app.services.azure_openai import (
+        fill_missing_fields_for_single_question,
+        AI_FILL_CONFIDENCE_THRESHOLD,
+    )
+
+    question_ids = payload.get("question_ids", [])
+    context = payload.get("context", {})
+
+    if not question_ids:
+        return {
+            "summary": {
+                "questions_processed": 0,
+                "fields_filled": 0,
+                "already_populated": 0,
+                "needs_review": 0,
+                "failed": 0,
+            },
+            "questions": []
+        }
+
+    # Fetch all questions
+    questions = db.query(Question).filter(Question.id.in_(question_ids)).all()
+    if not questions:
+        raise HTTPException(status_code=404, detail="No matching questions found")
+
+    # Map by ID to preserve order
+    q_map = {q.id: q for q in questions}
+    ordered_questions = [q_map[qid] for qid in question_ids if qid in q_map]
+
+    total_fields_filled = 0
+    total_already_populated = 0
+    total_needs_review = 0
+    total_failed = 0
+
+    tasks_to_run = []
+    for q in ordered_questions:
+        qs = q.question_set
+        if not qs or not qs.template:
+            total_failed += 1
+            continue
+
+        template_schema = qs.template.schema_json
+        columns = template_schema.get("columns", [])
+        core_cols = {col for col in columns if is_core_question_column(col)}
+        data_json = dict(q.data_json or {})
+
+        missing_fields = [
+            col for col in columns
+            if col not in core_cols and is_field_missing(data_json.get(col))
+        ]
+
+        if not missing_fields:
+            total_already_populated += len([c for c in columns if c not in core_cols])
+            continue
+
+        total_already_populated += len([c for c in columns if c not in core_cols and not is_field_missing(data_json.get(c))])
+        tasks_to_run.append((q, missing_fields, template_schema))
+
+    def process_single_q(task):
+        q_obj, m_fields, t_schema = task
+        try:
+            fill_result = fill_missing_fields_for_single_question(
+                question_data=dict(q_obj.data_json or {}),
+                missing_fields=m_fields,
+                template_schema=t_schema,
+                context=context,
+            )
+            return q_obj.id, fill_result, None
+        except Exception as err:
+            return q_obj.id, None, err
+
+    results_map = {}
+    if tasks_to_run:
+        with ThreadPoolExecutor(max_workers=min(len(tasks_to_run), 4)) as executor:
+            for q_id, f_res, err in executor.map(process_single_q, tasks_to_run):
+                results_map[q_id] = (f_res, err)
+
+    for q, missing_fields, template_schema in tasks_to_run:
+        f_res, err = results_map.get(q.id, (None, Exception("No result")))
+        if err or not f_res:
+            total_failed += 1
+            continue
+
+        data_json = dict(q.data_json or {})
+        new_data = dict(data_json)
+        new_metadata = dict(q.source_metadata_json or {"source_page": None, "fields": {}})
+        if "fields" not in new_metadata:
+            new_metadata["fields"] = {}
+
+        resolved_fields = []
+        unresolved_fields = []
+        review_required_fields = []
+
+        for field_name, field_result in f_res.items():
+            status = field_result.get("status", "UNRESOLVED")
+            value = field_result.get("value")
+            confidence = float(field_result.get("confidence", 0.0))
+            reason = field_result.get("reason", "")
+
+            if status == "AI_INFERRED" and value is not None and str(value).strip() != "" and confidence >= AI_FILL_CONFIDENCE_THRESHOLD:
+                val_str = str(value).strip()
+                new_data[field_name] = val_str
+                new_metadata["fields"][field_name] = {
+                    "origin": "AI_INFERRED",
+                    "status": "AI_INFERRED",
+                    "value": val_str,
+                    "confidence": confidence,
+                    "reason": reason,
+                }
+                resolved_fields.append(field_name)
+                total_fields_filled += 1
+            elif status == "AI_INFERRED" and value is not None and str(value).strip() != "" and confidence < AI_FILL_CONFIDENCE_THRESHOLD:
+                val_str = str(value).strip()
+                new_metadata["fields"][field_name] = {
+                    "origin": "AI_INFERRED",
+                    "status": "REVIEW_REQUIRED",
+                    "confidence": confidence,
+                    "ai_suggestion": val_str,
+                    "review_required": True,
+                    "reason": reason or "Low confidence inference requiring human sign-off.",
+                }
+                review_required_fields.append(field_name)
+                total_needs_review += 1
+            else:
+                new_metadata["fields"][field_name] = {
+                    "origin": "missing",
+                    "status": "MISSING",
+                    "confidence": 0.0,
+                    "reason": reason or "Could not be safely inferred from source question text or context.",
+                }
+                unresolved_fields.append(field_name)
+
+        errors = validate_question_row(new_data, template_schema)
+        existing_ai_val = q.validation_json.get("ai_validation") if q.validation_json else None
+        val_status = {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "ai_validation": existing_ai_val,
+        }
+
+        q.data_json = new_data
+        q.source_metadata_json = new_metadata
+        q.validation_json = val_status
+        q.status = "VALIDATED" if val_status["valid"] else "INVALID"
+        flag_modified(q, "data_json")
+        flag_modified(q, "source_metadata_json")
+        flag_modified(q, "validation_json")
+
+    db.commit()
+    for q in ordered_questions:
+        db.refresh(q)
+
+    return {
+        "summary": {
+            "questions_processed": len(ordered_questions),
+            "fields_filled": total_fields_filled,
+            "already_populated": total_already_populated,
+            "needs_review": total_needs_review,
+            "failed": total_failed,
+        },
+        "questions": [_build_question_response(q) for q in ordered_questions]
+    }
 
 
 
@@ -994,21 +1231,39 @@ def map_and_save(payload: dict = Body(...), db: Session = Depends(get_db)):
                 
             try:
                 suggestions = fill_missing_fields_for_questions(questions_for_ai, inferable_columns, context)
-                suggestions_by_id = {s.get("question_id"): s.get("fields", {}) for s in suggestions if s.get("question_id")}
-                
+                # Build robust lookup by question_id supporting "q_1", "q1", "1", 1
+                suggestions_by_id = {}
+                for s in suggestions:
+                    s_id = s.get("question_id")
+                    if s_id is not None:
+                        s_id_str = str(s_id).strip().lower()
+                        s_fields_data = s.get("fields", {})
+                        suggestions_by_id[s_id_str] = s_fields_data
+                        digits = re.findall(r"\d+", s_id_str)
+                        if digits:
+                            suggestions_by_id[f"q_{digits[0]}"] = s_fields_data
+                            suggestions_by_id[f"q{digits[0]}"] = s_fields_data
+                            suggestions_by_id[digits[0]] = s_fields_data
+
                 for idx, mq in enumerate(mapped_questions, start=1):
                     q_id = f"q_{idx}"
-                    if q_id in suggestions_by_id:
-                        s_fields = suggestions_by_id[q_id]
+                    s_fields = suggestions_by_id.get(q_id, {})
+                    if not s_fields:
+                        s_fields = suggestions_by_id.get(str(idx), {})
+                    
+                    if s_fields:
+                        norm_s_fields = {re.sub(r"[^a-zA-Z0-9]", "", k.lower()): v for k, v in s_fields.items()}
                         for col in inferable_columns:
-                            if col in s_fields and not mq["data"].get(col):
-                                s_info = s_fields[col]
+                            col_norm = re.sub(r"[^a-zA-Z0-9]", "", col.lower())
+                            s_info = s_fields.get(col) or norm_s_fields.get(col_norm)
+                            if s_info and is_field_missing(mq["data"].get(col)):
                                 status = s_info.get("status", "UNRESOLVED")
                                 val = s_info.get("value")
                                 conf = float(s_info.get("confidence", 0.0))
-                                
-                                if status == "AI_INFERRED" and val and conf >= AI_FILL_CONFIDENCE_THRESHOLD:
-                                    mq["data"][col] = str(val)
+
+                                if status == "AI_INFERRED" and val is not None and str(val).strip() != "":
+                                    val_str = str(val).strip()
+                                    mq["data"][col] = val_str
                                     mq["metadata"][col] = {
                                         "origin": "inferred",
                                         "confidence": conf,
@@ -1271,7 +1526,10 @@ def update_question(question_id: str, payload: dict = Body(...), db: Session = D
         
     answer_col = None
     for k in payload.keys():
-        if "correct" in k.lower() or "answer" in k.lower():
+        k_clean = k.strip().lower()
+        if re.match(r"^answer[\s_\-\.]*[1-4a-d]$", k_clean) or re.match(r"^(?:option|choice)[\s_\-\.]*[1-4a-d]$", k_clean):
+            continue
+        if "correct" in k_clean or "answer" in k_clean:
             answer_col = k
             break
 
